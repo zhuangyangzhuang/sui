@@ -32,8 +32,9 @@ use self::{
     crypto::{bls12381, ecdsa_k1, ecdsa_r1, ecvrf, ed25519, groth16, hash, hmac},
     event::EventEmitCostParams,
     object::{BorrowUidCostParams, DeleteImplCostParams, RecordNewIdCostParams},
+    tx_context::TxContextDeriveIdCostParams,
     types::TypeIsOneTimeWitnessCostParams,
-    validator::ValidatorValidateMetadataBcsCostParams, tx_context::TxContextDeriveIdCostParams,
+    validator::ValidatorValidateMetadataBcsCostParams,
 };
 
 #[derive(Tid)]
@@ -46,7 +47,7 @@ pub struct NativesCostTable {
     pub delete_impl_cost_params: DeleteImplCostParams,
     pub record_new_id_cost_params: RecordNewIdCostParams,
 
-    pub is_one_time_witness: TypeIsOneTimeWitnessCostParams,
+    pub type_is_one_time_witness_cost_params: TypeIsOneTimeWitnessCostParams,
     pub validate_metadata_bcs_cost_params: ValidatorValidateMetadataBcsCostParams,
     pub tx_context_derive_id_cost_params: TxContextDeriveIdCostParams,
 }

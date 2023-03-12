@@ -5,7 +5,7 @@ use super::object_runtime::{ObjectRuntime, TransferResult};
 use crate::legacy_emit_cost;
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{
-    account_address::AccountAddress, language_storage::TypeTag, vm_status::StatusCode,
+    account_address::AccountAddress, language_storage::TypeTag, vm_status::StatusCode, gas_algebra::InternalGas,
 };
 use move_vm_runtime::native_functions::NativeContext;
 use move_vm_types::{
@@ -20,6 +20,12 @@ use sui_types::{
 
 const E_SHARED_NON_NEW_OBJECT: u64 = 0;
 
+/***************************************************************************************************
+ * native fun transfer_internal
+ * Implementation of the Move native function `transfer_internal<T: key>(obj: T, recipient: vector<u8>, to_object: bool)`
+
+
+ **************************************************************************************************/
 /// Implementation of Move native function
 /// `transfer_internal<T: key>(obj: T, recipient: vector<u8>, to_object: bool)`
 /// Here, we simply emit this event. The sui adapter
@@ -100,6 +106,7 @@ pub fn share_object(
 
 fn object_runtime_transfer(
     context: &mut NativeContext,
+    gas_left: &mut InternalGas,
     owner: Owner,
     ty: Type,
     obj: Value,

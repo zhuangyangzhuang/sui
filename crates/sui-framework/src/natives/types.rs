@@ -7,12 +7,16 @@ use move_core_types::{
     language_storage::TypeTag,
     value::{MoveFieldLayout, MoveStructLayout, MoveTypeLayout},
 };
-use move_vm_runtime::native_functions::NativeContext;
+use move_vm_runtime::{
+    native_charge_gas_early_exit, native_functions::NativeContext, native_gas_total_cost,
+};
 use move_vm_types::{
     loaded_data::runtime_types::Type, natives::function::NativeResult, values::Value,
 };
 use smallvec::smallvec;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, ops::Mul};
+
+use crate::natives::NativesCostTable;
 
 pub(crate) fn is_otw_struct(struct_layout: &MoveStructLayout, type_tag: &TypeTag) -> bool {
     let has_one_bool_field = match struct_layout {
@@ -43,11 +47,20 @@ pub(crate) fn is_otw_struct(struct_layout: &MoveStructLayout, type_tag: &TypeTag
         TypeTag::Struct(struct_tag) if has_one_bool_field && struct_tag.name.to_string() == struct_tag.module.to_string().to_ascii_uppercase())
 }
 
-pub struct TypeIsOneTimeWitnessCostParams_ {
+pub struct TypeIsOneTimeWitnessCostParams {
     pub is_one_time_witness_cost_base: InternalGas,
+    pub type_to_type_tag_cost_per_byte: InternalGas,
+    pub type_to_type_layout_cost_per_byte: InternalGas,
+    pub struct_layout_check_cost_per_byte: InternalGas,
 }
-
-
+/***************************************************************************************************
+ * native fun derive_id
+ * Implementation of the Move native function `is_one_time_witness<T: drop>(_: &T): bool`
+ *   gas cost: is_one_time_witness_cost_base                        | base cost as this can be expensive oper
+ *              + type_to_type_tag_cost_per_byte * ty.size()        | cost per byte of converting type to type tag
+ *              + type_to_type_layout_cost_per_byte * ty.size()     | cost per byte of converting type to type layout
+ *              + struct_layout_check_cost_per_byte * ty.size()     | cost per byte of checking struct via `is_otw_struct`
+ **************************************************************************************************/
 pub fn is_one_time_witness(
     context: &mut NativeContext,
     mut ty_args: Vec<Type>,
@@ -55,19 +68,55 @@ pub fn is_one_time_witness(
 ) -> PartialVMResult<NativeResult> {
     debug_assert!(ty_args.len() == 1);
     debug_assert!(args.len() == 1);
+    let mut gas_left = context.gas_budget();
+    let natvies_cost_table: &NativesCostTable = context.extensions_mut().get();
+    let type_is_one_time_witness_cost_params =
+        &natvies_cost_table.type_is_one_time_witness_cost_params;
 
     // unwrap safe because the interface of native function guarantees it.
     let ty = ty_args.pop().unwrap();
+
+    native_charge_gas_early_exit!(
+        context,
+        gas_left,
+        type_is_one_time_witness_cost_params.is_one_time_witness_cost_base
+    );
+
+    let type_size: u64 = ty.size().into();
+
+    native_charge_gas_early_exit!(
+        context,
+        gas_left,
+        type_is_one_time_witness_cost_params
+            .type_to_type_tag_cost_per_byte
+            .mul(type_size.into())
+    );
     let type_tag = context.type_to_type_tag(&ty)?;
+
+    native_charge_gas_early_exit!(
+        context,
+        gas_left,
+        type_is_one_time_witness_cost_params
+            .type_to_type_layout_cost_per_byte
+            .mul(type_size.into())
+    );
     let type_layout = context.type_to_type_layout(&ty)?;
 
-    // TODO: what should the cost of this be?
-    let cost = legacy_length_cost();
     let Some(MoveTypeLayout::Struct(struct_layout)) = type_layout else {
-        return Ok(NativeResult::ok(cost, smallvec![Value::bool(false)]))
+        return Ok(NativeResult::ok(native_gas_total_cost!(context, gas_left), smallvec![Value::bool(false)]))
     };
 
+    native_charge_gas_early_exit!(
+        context,
+        gas_left,
+        type_is_one_time_witness_cost_params
+            .struct_layout_check_cost_per_byte
+            .mul(type_size.into())
+    );
     let is_otw = is_otw_struct(&struct_layout, &type_tag);
 
-    Ok(NativeResult::ok(cost, smallvec![Value::bool(is_otw)]))
+    Ok(NativeResult::ok(
+        native_gas_total_cost!(context, gas_left),
+        smallvec![Value::bool(is_otw)],
+    ))
 }
