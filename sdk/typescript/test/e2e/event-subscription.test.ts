@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect, beforeAll, vi } from 'vitest';
-import { RawSigner, SuiEventEnvelope } from '../../src';
+import { SuiEventEnvelope, Transaction } from '../../src';
 import {
   DEFAULT_GAS_BUDGET,
   DEFAULT_RECIPIENT,
@@ -12,11 +12,9 @@ import {
 
 describe('Event Subscription API', () => {
   let toolbox: TestToolbox;
-  let signer: RawSigner;
 
   beforeAll(async () => {
     toolbox = await setup();
-    signer = new RawSigner(toolbox.keypair, toolbox.provider);
   });
 
   const mockCallback = vi.fn((_: SuiEventEnvelope) =>
@@ -29,15 +27,14 @@ describe('Event Subscription API', () => {
       mockCallback,
     );
 
-    const inputCoins = await toolbox.provider.getGasObjectsOwnedByAddress(
-      toolbox.address(),
+    const tx = new Transaction();
+    tx.setGasBudget(DEFAULT_GAS_BUDGET);
+    tx.transferObjects([tx.gas], tx.pure(DEFAULT_RECIPIENT));
+    await toolbox.signer.signAndExecuteTransaction(
+      tx,
+      {},
+      'WaitForLocalExecution',
     );
-
-    await signer.payAllSui({
-      inputCoins: inputCoins.map((o) => o.objectId),
-      recipient: DEFAULT_RECIPIENT,
-      gasBudget: DEFAULT_GAS_BUDGET,
-    });
 
     const subFoundAndRemoved = await toolbox.provider.unsubscribeEvent(
       subscriptionId,

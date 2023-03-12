@@ -2,48 +2,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { fromB64, toB64 } from '@mysten/bcs';
+import { Transaction } from '../builder';
+import { TransactionDataBuilder } from '../builder/TransactionData';
 import { SerializedSignature } from '../cryptography/signature';
-import { JsonRpcProvider } from '../providers/json-rpc-provider';
 import { Provider } from '../providers/provider';
-import { VoidProvider } from '../providers/void-provider';
 import { HttpHeaders } from '../rpc/client';
 import {
-  deserializeTransactionBytesToTransactionData,
   ExecuteTransactionRequestType,
   FaucetResponse,
-  generateTransactionDigest,
   getTotalGasUsedUpperBound,
   SuiAddress,
-  SuiTransactionResponse,
   DevInspectResults,
-  bcsForVersion,
   DryRunTransactionResponse,
+  SuiTransactionResponse,
+  SuiTransactionResponseOptions,
 } from '../types';
 import { IntentScope, messageWithIntent } from '../utils/intent';
 import { Signer } from './signer';
-import { RpcTxnDataSerializer } from './txn-data-serializers/rpc-txn-data-serializer';
-import {
-  MoveCallTransaction,
-  MergeCoinTransaction,
-  PayTransaction,
-  PaySuiTransaction,
-  PayAllSuiTransaction,
-  SplitCoinTransaction,
-  TransferObjectTransaction,
-  TransferSuiTransaction,
-  TxnDataSerializer,
-  PublishTransaction,
-  SignableTransaction,
-  UnserializedSignableTransaction,
-  SignedTransaction,
-  SignedMessage,
-} from './txn-data-serializers/txn-data-serializer';
+import { SignedTransaction, SignedMessage } from './types';
 
 ///////////////////////////////
 // Exported Abstracts
 export abstract class SignerWithProvider implements Signer {
   readonly provider: Provider;
-  readonly serializer: TxnDataSerializer;
 
   ///////////////////
   // Sub-classes MUST implement these
@@ -77,16 +58,8 @@ export abstract class SignerWithProvider implements Signer {
     );
   }
 
-  constructor(provider?: Provider, serializer?: TxnDataSerializer) {
-    this.provider = provider || new VoidProvider();
-    let endpoint = '';
-    let skipDataValidation = false;
-    if (this.provider instanceof JsonRpcProvider) {
-      endpoint = this.provider.connection.fullnode;
-      skipDataValidation = this.provider.options.skipDataValidation!;
-    }
-    this.serializer =
-      serializer || new RpcTxnDataSerializer(endpoint, skipDataValidation);
+  constructor(provider: Provider) {
+    this.provider = provider;
   }
 
   /**
@@ -107,18 +80,17 @@ export abstract class SignerWithProvider implements Signer {
    * Sign a transaction.
    */
   async signTransaction(
-    transaction: Uint8Array | SignableTransaction,
+    transaction: Uint8Array | Transaction,
   ): Promise<SignedTransaction> {
     let transactionBytes;
-    if (transaction instanceof Uint8Array || transaction.kind === 'bytes') {
-      transactionBytes =
-        transaction instanceof Uint8Array ? transaction : transaction.data;
+
+    if (Transaction.is(transaction)) {
+      transaction.setSender(await this.getAddress());
+      transactionBytes = await transaction.build({ provider: this.provider });
+    } else if (transaction instanceof Uint8Array) {
+      transactionBytes = transaction;
     } else {
-      transactionBytes = await this.serializer.serializeToBytes(
-        await this.getAddress(),
-        transaction,
-        'Commit',
-      );
+      throw new Error('Unknown transaction format');
     }
 
     const intentMessage = messageWithIntent(
@@ -135,10 +107,16 @@ export abstract class SignerWithProvider implements Signer {
 
   /**
    * Sign a transaction and submit to the Fullnode for execution.
+   *
+   * @param options specify which fields to return (e.g., transaction, effects, events, etc).
+   * By default, only the transaction digest will be returned.
+   * @param requestType WaitForEffectsCert or WaitForLocalExecution, see details in `ExecuteTransactionRequestType`.
+   * Defaults to `WaitForLocalExecution` if options.show_effects or options.show_events is true
    */
   async signAndExecuteTransaction(
-    transaction: Uint8Array | SignableTransaction,
-    requestType: ExecuteTransactionRequestType = 'WaitForLocalExecution',
+    transaction: Uint8Array | Transaction,
+    options?: SuiTransactionResponseOptions,
+    requestType?: ExecuteTransactionRequestType,
   ): Promise<SuiTransactionResponse> {
     const { transactionBytes, signature } = await this.signTransaction(
       transaction,
@@ -147,27 +125,25 @@ export abstract class SignerWithProvider implements Signer {
     return await this.provider.executeTransaction(
       transactionBytes,
       signature,
+      options,
       requestType,
     );
   }
 
-  async getTransactionDigest(
-    tx: Uint8Array | SignableTransaction,
-  ): Promise<string> {
-    let txBytes: Uint8Array;
-    if (tx instanceof Uint8Array || tx.kind === 'bytes') {
-      txBytes = tx instanceof Uint8Array ? tx : tx.data;
+  /**
+   * Derive transaction digest from
+   * @param tx BCS serialized transaction data or a `Transaction` object
+   * @returns transaction digest
+   */
+  async getTransactionDigest(tx: Uint8Array | Transaction): Promise<string> {
+    if (Transaction.is(tx)) {
+      tx.setSender(await this.getAddress());
+      return tx.getDigest({ provider: this.provider });
+    } else if (tx instanceof Uint8Array) {
+      return TransactionDataBuilder.getDigestFromBytes(tx);
     } else {
-      txBytes = await this.serializer.serializeToBytes(
-        await this.getAddress(),
-        tx,
-        'DevInspect',
-      );
+      throw new Error('Unknown transaction format.');
     }
-    const version = await this.provider.getRpcApiVersion();
-    const bcs = bcsForVersion(version);
-    const data = deserializeTransactionBytesToTransactionData(bcs, txBytes);
-    return generateTransactionDigest(data, bcs);
   }
 
   /**
@@ -182,7 +158,7 @@ export abstract class SignerWithProvider implements Signer {
    * in the Sui System State object
    */
   async devInspectTransaction(
-    tx: UnserializedSignableTransaction | string | Uint8Array,
+    tx: Transaction | string | Uint8Array,
     gasPrice: number | null = null,
     epoch: number | null = null,
   ): Promise<DevInspectResults> {
@@ -196,158 +172,20 @@ export abstract class SignerWithProvider implements Signer {
    * @returns The transaction effects
    */
   async dryRunTransaction(
-    tx: SignableTransaction | string | Uint8Array,
+    tx: Transaction | string | Uint8Array,
   ): Promise<DryRunTransactionResponse> {
-    const address = await this.getAddress();
     let dryRunTxBytes: Uint8Array;
-    if (typeof tx === 'string') {
+    if (Transaction.is(tx)) {
+      tx.setSender(await this.getAddress());
+      dryRunTxBytes = await tx.build({ provider: this.provider });
+    } else if (typeof tx === 'string') {
       dryRunTxBytes = fromB64(tx);
     } else if (tx instanceof Uint8Array) {
       dryRunTxBytes = tx;
     } else {
-      switch (tx.kind) {
-        case 'bytes':
-          dryRunTxBytes = tx.data;
-          break;
-        default:
-          dryRunTxBytes = await this.serializer.serializeToBytes(
-            address,
-            tx,
-            'Commit',
-          );
-          break;
-      }
+      throw new Error('Unknown transaction format');
     }
     return this.provider.dryRunTransaction(dryRunTxBytes);
-  }
-
-  /**
-   *
-   * Serialize and sign a `TransferObject` transaction and submit to the Fullnode
-   * for execution
-   */
-  async transferObject(
-    transaction: TransferObjectTransaction,
-    requestType: ExecuteTransactionRequestType = 'WaitForLocalExecution',
-  ): Promise<SuiTransactionResponse> {
-    return this.signAndExecuteTransaction(
-      { kind: 'transferObject', data: transaction },
-      requestType,
-    );
-  }
-
-  /**
-   *
-   * Serialize and sign a `TransferSui` transaction and submit to the Fullnode
-   * for execution
-   */
-  async transferSui(
-    transaction: TransferSuiTransaction,
-    requestType: ExecuteTransactionRequestType = 'WaitForLocalExecution',
-  ): Promise<SuiTransactionResponse> {
-    return this.signAndExecuteTransaction(
-      { kind: 'transferSui', data: transaction },
-      requestType,
-    );
-  }
-
-  /**
-   *
-   * Serialize and Sign a `Pay` transaction and submit to the fullnode for execution
-   */
-  async pay(
-    transaction: PayTransaction,
-    requestType: ExecuteTransactionRequestType = 'WaitForLocalExecution',
-  ): Promise<SuiTransactionResponse> {
-    return this.signAndExecuteTransaction(
-      { kind: 'pay', data: transaction },
-      requestType,
-    );
-  }
-
-  /**
-   * Serialize and Sign a `PaySui` transaction and submit to the fullnode for execution
-   */
-  async paySui(
-    transaction: PaySuiTransaction,
-    requestType: ExecuteTransactionRequestType = 'WaitForLocalExecution',
-  ): Promise<SuiTransactionResponse> {
-    return this.signAndExecuteTransaction(
-      { kind: 'paySui', data: transaction },
-      requestType,
-    );
-  }
-
-  /**
-   * Serialize and Sign a `PayAllSui` transaction and submit to the fullnode for execution
-   */
-  async payAllSui(
-    transaction: PayAllSuiTransaction,
-    requestType: ExecuteTransactionRequestType = 'WaitForLocalExecution',
-  ): Promise<SuiTransactionResponse> {
-    return this.signAndExecuteTransaction(
-      { kind: 'payAllSui', data: transaction },
-      requestType,
-    );
-  }
-
-  /**
-   *
-   * Serialize and sign a `MergeCoin` transaction and submit to the Fullnode
-   * for execution
-   */
-  async mergeCoin(
-    transaction: MergeCoinTransaction,
-    requestType: ExecuteTransactionRequestType = 'WaitForLocalExecution',
-  ): Promise<SuiTransactionResponse> {
-    return this.signAndExecuteTransaction(
-      { kind: 'mergeCoin', data: transaction },
-      requestType,
-    );
-  }
-
-  /**
-   *
-   * Serialize and sign a `SplitCoin` transaction and submit to the Fullnode
-   * for execution
-   */
-  async splitCoin(
-    transaction: SplitCoinTransaction,
-    requestType: ExecuteTransactionRequestType = 'WaitForLocalExecution',
-  ): Promise<SuiTransactionResponse> {
-    return this.signAndExecuteTransaction(
-      { kind: 'splitCoin', data: transaction },
-      requestType,
-    );
-  }
-
-  /**
-   * Serialize and sign a `MoveCall` transaction and submit to the Fullnode
-   * for execution
-   */
-  async executeMoveCall(
-    transaction: MoveCallTransaction,
-    requestType: ExecuteTransactionRequestType = 'WaitForLocalExecution',
-  ): Promise<SuiTransactionResponse> {
-    return this.signAndExecuteTransaction(
-      { kind: 'moveCall', data: transaction },
-      requestType,
-    );
-  }
-
-  /**
-   *
-   * Serialize and sign a `Publish` transaction and submit to the Fullnode
-   * for execution
-   */
-  async publish(
-    transaction: PublishTransaction,
-    requestType: ExecuteTransactionRequestType = 'WaitForLocalExecution',
-  ): Promise<SuiTransactionResponse> {
-    return this.signAndExecuteTransaction(
-      { kind: 'publish', data: transaction },
-      requestType,
-    );
   }
 
   /**

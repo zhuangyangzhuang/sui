@@ -11,16 +11,17 @@ use fastcrypto::traits::ToFromBytes;
 use jsonrpsee::core::RpcResult;
 use jsonrpsee::RpcModule;
 use mysten_metrics::spawn_monitored_task;
+use shared_crypto::intent::Intent;
 use std::sync::Arc;
 use sui_core::authority::AuthorityState;
 use sui_core::authority_client::NetworkAuthorityClient;
 use sui_core::transaction_orchestrator::TransactiondOrchestrator;
 use sui_json_rpc_types::{
     DevInspectResults, DryRunTransactionResponse, SuiTransactionEvents, SuiTransactionResponse,
+    SuiTransactionResponseOptions,
 };
 use sui_open_rpc::Module;
 use sui_types::base_types::{EpochId, SuiAddress};
-use sui_types::intent::Intent;
 use sui_types::messages::{
     ExecuteTransactionRequest, ExecuteTransactionRequestType, TransactionKind,
 };
@@ -49,30 +50,21 @@ impl WriteApiServer for TransactionExecutionApi {
     async fn execute_transaction(
         &self,
         tx_bytes: Base64,
-        signature: Base64,
-        request_type: ExecuteTransactionRequestType,
-    ) -> RpcResult<SuiTransactionResponse> {
-        self.submit_transaction(tx_bytes, vec![signature], request_type)
-            .await
-    }
-
-    // TODO: remove this or execute_transaction
-    async fn execute_transaction_serialized_sig(
-        &self,
-        tx_bytes: Base64,
-        signature: Base64,
-        request_type: ExecuteTransactionRequestType,
-    ) -> RpcResult<SuiTransactionResponse> {
-        self.execute_transaction(tx_bytes, signature, request_type)
-            .await
-    }
-
-    async fn submit_transaction(
-        &self,
-        tx_bytes: Base64,
         signatures: Vec<Base64>,
-        request_type: ExecuteTransactionRequestType,
+        opts: Option<SuiTransactionResponseOptions>,
+        request_type: Option<ExecuteTransactionRequestType>,
     ) -> RpcResult<SuiTransactionResponse> {
+        let opts = opts.unwrap_or_default();
+        let request_type = match (request_type, opts.require_local_execution()) {
+            (Some(ExecuteTransactionRequestType::WaitForEffectsCert), true) => {
+                return Err(anyhow!(
+                    "`request_type` must set to `None` or `WaitForLocalExecution`\
+                         if effects is required in the response"
+                )
+                .into());
+            }
+            (t, _) => t.unwrap_or_else(|| opts.default_execution_request_type()),
+        };
         let tx_data =
             bcs::from_bytes(&tx_bytes.to_vec().map_err(|e| anyhow!(e))?).map_err(|e| anyhow!(e))?;
 
@@ -86,6 +78,7 @@ impl WriteApiServer for TransactionExecutionApi {
 
         let txn = Transaction::from_generic_sig_data(tx_data, Intent::default(), sigs);
         let tx = txn.data().clone().try_into()?;
+        let digest = *txn.digest();
 
         let transaction_orchestrator = self.transaction_orchestrator.clone();
         let response = spawn_monitored_task!(transaction_orchestrator.execute_transaction(
@@ -100,19 +93,29 @@ impl WriteApiServer for TransactionExecutionApi {
 
         match response {
             ExecuteTransactionResponse::EffectsCert(cert) => {
-                let (effects, events, is_executed_locally) = *cert;
-                let module_cache = self
-                    .state
-                    .load_epoch_store_one_call_per_task()
-                    .module_cache()
-                    .clone();
+                let (effects, transaction_events, is_executed_locally) = *cert;
+                let mut events: Option<SuiTransactionEvents> = None;
+                if opts.show_events {
+                    let module_cache = self
+                        .state
+                        .load_epoch_store_one_call_per_task()
+                        .module_cache()
+                        .clone();
+                    events = Some(SuiTransactionEvents::try_from(
+                        transaction_events,
+                        module_cache.as_ref(),
+                    )?);
+                }
+
                 Ok(SuiTransactionResponse {
-                    transaction: tx,
-                    effects: effects.effects.into(),
-                    events: SuiTransactionEvents::try_from(events, module_cache.as_ref())?,
+                    digest,
+                    transaction: opts.show_input.then_some(tx),
+                    effects: opts.show_effects.then_some(effects.effects.try_into()?),
+                    events,
                     timestamp_ms: None,
                     confirmed_local_execution: Some(is_executed_locally),
                     checkpoint: None,
+                    errors: vec![],
                 })
             }
         }

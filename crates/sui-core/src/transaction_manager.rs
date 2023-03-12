@@ -10,11 +10,11 @@ use parking_lot::RwLock;
 use sui_types::{
     base_types::ObjectID,
     committee::EpochId,
-    messages::{VerifiedCertificate, VerifiedExecutableTransaction},
+    messages::{TransactionDataAPI, VerifiedCertificate, VerifiedExecutableTransaction},
 };
 use sui_types::{base_types::TransactionDigest, error::SuiResult};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::authority::{
     authority_per_epoch_store::AuthorityPerEpochStore, authority_store::InputKey,
@@ -138,6 +138,9 @@ impl TransactionManager {
                 &input_object_kinds,
                 epoch_store,
             );
+            if input_object_kinds.len() != input_object_keys.len() {
+                error!("Duplicated input objects: {:?}", input_object_kinds);
+            }
             pending.push(PendingCertificate {
                 certificate: cert,
                 missing: input_object_keys
@@ -211,6 +214,9 @@ impl TransactionManager {
                     .transaction_manager_num_enqueued_certificates
                     .with_label_values(&["ready"])
                     .inc();
+                // Record as an executing certificate.
+                assert!(inner.executing_certificates.insert(digest));
+                // Send to execution driver for execution.
                 self.certificate_ready(pending_cert.certificate);
                 continue;
             }
@@ -379,6 +385,12 @@ impl TransactionManager {
                 )
             })
             .collect()
+    }
+
+    // Returns the number of certificates pending execution or being executed by the execution driver right now.
+    pub(crate) fn execution_queue_len(&self) -> usize {
+        let inner = self.inner.read();
+        inner.pending_certificates.len() + inner.executing_certificates.len()
     }
 
     // Reconfigures the TransactionManager for a new epoch. Existing transactions will be dropped

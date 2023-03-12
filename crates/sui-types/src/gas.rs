@@ -7,6 +7,7 @@ use crate::messages::TransactionEffects;
 use crate::{
     error::{ExecutionError, ExecutionErrorKind},
     gas_coin::GasCoin,
+    messages::TransactionEffectsAPI,
     object::{Object, Owner},
 };
 use itertools::MultiUnzip;
@@ -49,6 +50,7 @@ macro_rules! ok_or_gas_balance_error {
 }
 
 #[derive(Eq, PartialEq, Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct GasCostSummary {
     pub computation_cost: u64,
     pub storage_cost: u64,
@@ -98,9 +100,9 @@ impl GasCostSummary {
             transactions
                 .map(|e| {
                     (
-                        e.gas_used.storage_cost,
-                        e.gas_used.computation_cost,
-                        e.gas_used.storage_rebate,
+                        e.gas_cost_summary().storage_cost,
+                        e.gas_cost_summary().computation_cost,
+                        e.gas_cost_summary().storage_rebate,
                     )
                 })
                 .multiunzip();
@@ -377,7 +379,7 @@ impl<'a> SuiGasStatus<'a> {
     /// Returns the final (computation cost, storage cost, storage rebate) of the gas meter.
     /// We use initial budget, combined with remaining gas and storage cost to derive
     /// computation cost.
-    pub fn summary(&self, succeeded: bool) -> GasCostSummary {
+    pub fn summary(&self) -> GasCostSummary {
         let remaining_gas = self.gas_status.remaining_gas();
         let storage_cost = self.storage_gas_units;
         // TODO: handle underflow how?
@@ -388,20 +390,10 @@ impl<'a> SuiGasStatus<'a> {
             .checked_sub(storage_cost)
             .expect("Subtraction overflowed");
         let computation_cost_in_sui = computation_cost.mul(self.computation_gas_unit_price).into();
-        if succeeded {
-            GasCostSummary {
-                computation_cost: computation_cost_in_sui,
-                storage_cost: storage_cost.mul(self.storage_gas_unit_price).into(),
-                storage_rebate: self.storage_rebate.into(),
-            }
-        } else {
-            // If execution failed, no storage creation/deletion will materialize in the store.
-            // Hence they should be 0.
-            GasCostSummary {
-                computation_cost: computation_cost_in_sui,
-                storage_cost: 0,
-                storage_rebate: 0,
-            }
+        GasCostSummary {
+            computation_cost: computation_cost_in_sui,
+            storage_cost: storage_cost.mul(self.storage_gas_unit_price).into(),
+            storage_rebate: self.storage_rebate.into(),
         }
     }
 
@@ -467,9 +459,7 @@ pub fn check_gas_balance(
     gas_object: &Object,
     gas_budget: u64,
     gas_price: u64,
-    extra_amount: u64,
     more_gas_objs: Vec<Object>,
-    extra_objs: Vec<Object>,
     cost_table: &SuiCostTable,
 ) -> UserInputResult {
     if !(matches!(gas_object.owner, Owner::AddressOwner(_))) {
@@ -502,12 +492,8 @@ pub fn check_gas_balance(
     }
     ok_or_gas_balance_error!(gas_balance, gas_budget_amount)?;
 
-    let mut total_balance = gas_balance;
-    for extra_obj in extra_objs {
-        total_balance += get_gas_balance(&extra_obj)? as u128;
-    }
-
-    let total_amount = (gas_budget as u128) + (extra_amount as u128);
+    let total_balance = gas_balance;
+    let total_amount = gas_budget as u128;
     ok_or_gas_balance_error!(total_balance, total_amount)
 }
 

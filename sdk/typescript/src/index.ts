@@ -17,14 +17,12 @@ export * from './rpc/faucet-client';
 export * from './rpc/websocket-client';
 export * from './rpc/connection';
 
-export * from './signers/txn-data-serializers/rpc-txn-data-serializer';
-export * from './signers/txn-data-serializers/txn-data-serializer';
-export * from './signers/txn-data-serializers/local-txn-data-serializer';
 export * from './signers/txn-data-serializers/type-tag-serializer';
 
 export * from './signers/signer';
 export * from './signers/raw-signer';
 export * from './signers/signer-with-provider';
+export * from './signers/types';
 
 export * from './types';
 export * from './utils/format';
@@ -32,6 +30,8 @@ export * from './utils/intent';
 export * from './utils/verify';
 
 export * from './framework';
+
+export * from './builder';
 
 export { fromB64, toB64 } from '@mysten/bcs';
 

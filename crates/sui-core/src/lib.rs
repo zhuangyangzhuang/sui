@@ -12,25 +12,23 @@ pub mod checkpoints;
 pub mod consensus_adapter;
 pub mod consensus_handler;
 pub mod consensus_validator;
+pub mod db_checkpoint_handler;
 pub mod epoch;
 pub mod event_handler;
 mod execution_driver;
 pub mod metrics;
 pub mod module_cache_metrics;
 pub mod narwhal_manager;
-mod notify_once;
 pub mod quorum_driver;
 pub mod safe_client;
 mod stake_aggregator;
 pub mod state_accumulator;
 pub mod storage;
 pub mod streamer;
-pub mod tbls;
 pub mod test_utils;
 pub mod transaction_input_checker;
 mod transaction_manager;
 pub mod transaction_orchestrator;
-pub mod validator_info;
 
 #[cfg(test)]
 #[path = "unit_tests/pay_sui_tests.rs"]

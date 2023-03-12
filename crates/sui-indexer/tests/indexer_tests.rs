@@ -7,11 +7,12 @@ use std::time::Duration;
 use sui_indexer::errors::IndexerError;
 use sui_indexer::models::checkpoints::Checkpoint;
 use sui_indexer::models::objects::Object;
-use sui_indexer::models::owners::OwnerChange;
 use sui_indexer::models::transactions::Transaction;
 use sui_indexer::store::{IndexerStore, TemporaryCheckpointStore, TemporaryEpochStore};
 use sui_indexer::Indexer;
 use sui_json_rpc_types::CheckpointId;
+use sui_types::base_types::{ObjectID, SequenceNumber};
+use sui_types::object::ObjectRead;
 use test_utils::network::TestClusterBuilder;
 
 #[tokio::test]
@@ -51,7 +52,6 @@ impl InMemoryIndexerStore {
 #[derive(Default, Clone, Debug)]
 struct Tables {
     pub objects: Vec<Object>,
-    pub owner_changes: Vec<OwnerChange>,
     pub checkpoints: Vec<Checkpoint>,
 }
 
@@ -77,31 +77,60 @@ impl IndexerStore for InMemoryIndexerStore {
         })
     }
 
+    fn get_event(
+        &self,
+        _id: sui_types::event::EventID,
+    ) -> Result<sui_indexer::models::events::Event, IndexerError> {
+        todo!()
+    }
+
+    fn get_events(
+        &self,
+        _query: sui_types::query::EventQuery,
+        _cursor: Option<sui_types::event::EventID>,
+        _limit: Option<usize>,
+        _descending_order: bool,
+    ) -> Result<sui_json_rpc_types::EventPage, IndexerError> {
+        todo!()
+    }
+
     fn get_total_transaction_number(&self) -> Result<i64, IndexerError> {
         todo!()
     }
 
-    fn get_latest_transaction_sequence_number(&self) -> Result<i64, IndexerError> {
-        todo!()
-    }
-
-    fn get_transaction_by_digest(&self, _txn_digest: String) -> Result<Transaction, IndexerError> {
+    fn get_transaction_by_digest(&self, _txn_digest: &str) -> Result<Transaction, IndexerError> {
         todo!()
     }
 
     fn get_transaction_sequence_by_digest(
         &self,
         _txn_digest: Option<String>,
-        _reverse: bool,
-    ) -> Result<i64, IndexerError> {
+        _is_descending: bool,
+    ) -> Result<Option<i64>, IndexerError> {
+        todo!()
+    }
+
+    fn get_recipient_sequence_by_digest(
+        &self,
+        _txn_digest: Option<String>,
+        _is_descending: bool,
+    ) -> Result<Option<i64>, IndexerError> {
+        todo!()
+    }
+
+    fn get_move_call_sequence_by_digest(
+        &self,
+        _txn_digest: Option<String>,
+        _is_descending: bool,
+    ) -> Result<Option<i64>, IndexerError> {
         todo!()
     }
 
     fn get_all_transaction_digest_page(
         &self,
-        _start_sequence: i64,
+        _start_sequence: Option<i64>,
         _limit: usize,
-        _reverse: bool,
+        _is_descending: bool,
     ) -> Result<Vec<String>, IndexerError> {
         todo!()
     }
@@ -109,9 +138,9 @@ impl IndexerStore for InMemoryIndexerStore {
     fn get_transaction_digest_page_by_mutated_object(
         &self,
         _object_id: String,
-        _start_sequence: i64,
+        _start_sequence: Option<i64>,
         _limit: usize,
-        _reverse: bool,
+        _is_descending: bool,
     ) -> Result<Vec<String>, IndexerError> {
         todo!()
     }
@@ -119,9 +148,21 @@ impl IndexerStore for InMemoryIndexerStore {
     fn get_transaction_digest_page_by_sender_address(
         &self,
         _sender_address: String,
-        _start_sequence: i64,
+        _start_sequence: Option<i64>,
         _limit: usize,
-        _reverse: bool,
+        _is_descending: bool,
+    ) -> Result<Vec<String>, IndexerError> {
+        todo!()
+    }
+
+    fn get_transaction_digest_page_by_move_call(
+        &self,
+        _package: String,
+        _module: Option<String>,
+        _function: Option<String>,
+        _start_sequence: Option<i64>,
+        _limit: usize,
+        _is_descending: bool,
     ) -> Result<Vec<String>, IndexerError> {
         todo!()
     }
@@ -129,9 +170,9 @@ impl IndexerStore for InMemoryIndexerStore {
     fn get_transaction_digest_page_by_recipient_address(
         &self,
         _recipient_address: String,
-        _start_sequence: i64,
+        _start_sequence: Option<i64>,
         _limit: usize,
-        _reverse: bool,
+        _is_descending: bool,
     ) -> Result<Vec<String>, IndexerError> {
         todo!()
     }
@@ -144,17 +185,25 @@ impl IndexerStore for InMemoryIndexerStore {
         todo!()
     }
 
+    fn get_object(
+        &self,
+        _object_id: ObjectID,
+        _version: Option<SequenceNumber>,
+    ) -> Result<ObjectRead, IndexerError> {
+        todo!();
+    }
+
     fn persist_checkpoint(&self, data: &TemporaryCheckpointStore) -> Result<usize, IndexerError> {
         let TemporaryCheckpointStore {
-            objects,
-            owner_changes,
+            objects_changes,
             checkpoint,
             ..
         } = data;
 
         let mut tables = self.tables.write().unwrap();
-        tables.objects.extend(objects.clone());
-        tables.owner_changes.extend(owner_changes.clone());
+        for changes in objects_changes {
+            tables.objects.extend(changes.mutated_objects.clone());
+        }
         tables.checkpoints.push(checkpoint.clone());
         Ok(0)
     }

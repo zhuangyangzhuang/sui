@@ -11,18 +11,16 @@ use std::collections::BTreeMap;
 use sui_json_rpc::api::{cap_page_limit, ReadApiClient, ReadApiServer};
 use sui_json_rpc::SuiRpcModule;
 use sui_json_rpc_types::{
-    Checkpoint, CheckpointId, DynamicFieldPage, GetObjectDataResponse, GetPastObjectDataResponse,
-    GetRawObjectDataResponse, MoveFunctionArgType, Page, SuiMoveNormalizedFunction,
-    SuiMoveNormalizedModule, SuiMoveNormalizedStruct, SuiObjectInfo, SuiTransactionResponse,
-    TransactionsPage,
+    Checkpoint, CheckpointId, DynamicFieldPage, MoveFunctionArgType, Page, SuiGetPastObjectRequest,
+    SuiMoveNormalizedFunction, SuiMoveNormalizedModule, SuiMoveNormalizedStruct,
+    SuiObjectDataOptions, SuiObjectInfo, SuiObjectResponse, SuiPastObjectResponse,
+    SuiTransactionResponse, SuiTransactionResponseOptions, TransactionsPage,
 };
 use sui_open_rpc::Module;
 use sui_types::base_types::{ObjectID, SequenceNumber, SuiAddress, TxSequenceNumber};
-use sui_types::digests::{CheckpointContentsDigest, CheckpointDigest, TransactionDigest};
+use sui_types::digests::TransactionDigest;
 use sui_types::dynamic_field::DynamicFieldName;
-use sui_types::messages_checkpoint::{
-    CheckpointContents, CheckpointSequenceNumber, CheckpointSummary,
-};
+use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use sui_types::query::TransactionQuery;
 
 pub(crate) struct ReadApi<S> {
@@ -41,74 +39,95 @@ impl<S: IndexerStore> ReadApi<S> {
         }
     }
 
-    async fn get_total_transaction_number(&self) -> RpcResult<u64> {
-        let total_tx_number = self.state.get_total_transaction_number()?;
-        Ok(total_tx_number as u64)
+    fn get_total_transaction_number(&self) -> Result<u64, IndexerError> {
+        self.state.get_total_transaction_number().map(|n| n as u64)
     }
 
-    async fn get_transaction(
+    fn get_transaction_with_options(
         &self,
-        digest: TransactionDigest,
-    ) -> RpcResult<SuiTransactionResponse> {
+        digest: &TransactionDigest,
+        _options: Option<SuiTransactionResponseOptions>,
+    ) -> Result<SuiTransactionResponse, IndexerError> {
+        // TODO(chris): support options in indexer
         let txn_resp: SuiTransactionResponse = self
             .state
-            .get_transaction_by_digest(digest.to_string())?
+            .get_transaction_by_digest(&digest.base58_encode())?
             .try_into()?;
         Ok(txn_resp)
     }
 
-    async fn get_transactions(
+    fn get_transactions(
         &self,
         query: TransactionQuery,
         cursor: Option<TransactionDigest>,
         limit: Option<usize>,
         descending_order: Option<bool>,
-    ) -> RpcResult<TransactionsPage> {
+    ) -> Result<TransactionsPage, IndexerError> {
         let limit = cap_page_limit(limit);
-        let indexer_seq_number = self.state.get_transaction_sequence_by_digest(
-            cursor.map(|digest| digest.to_string()),
-            descending_order.unwrap_or_default(),
-        )?;
+        let is_descending = descending_order.unwrap_or_default();
+        let cursor_str = cursor.map(|digest| digest.to_string());
 
         let digests_from_db = match query {
-            TransactionQuery::All => self.state.get_all_transaction_digest_page(
-                indexer_seq_number,
-                limit,
-                descending_order.unwrap_or_default(),
-            ),
-            // TODO(gegaowp): implement Move call query handling.
+            TransactionQuery::All => {
+                let indexer_seq_number = self
+                    .state
+                    .get_transaction_sequence_by_digest(cursor_str, is_descending)?;
+                self.state
+                    .get_all_transaction_digest_page(indexer_seq_number, limit, is_descending)
+            }
             TransactionQuery::MoveFunction {
-                package: _,
-                module: _,
-                function: _,
-            } => Ok(vec![]),
+                package,
+                module,
+                function,
+            } => {
+                let move_call_seq_number = self
+                    .state
+                    .get_move_call_sequence_by_digest(cursor_str, is_descending)?;
+                self.state.get_transaction_digest_page_by_move_call(
+                    package.to_string(),
+                    module,
+                    function,
+                    move_call_seq_number,
+                    limit,
+                    is_descending,
+                )
+            }
             // TODO(gegaowp): input objects are tricky to retrive from
             // SuiTransactionResponse, instead we should store the BCS
             // serialized transaction and retrive from there.
             // This is now blocked by the endpoint on FN side.
             TransactionQuery::InputObject(_input_obj_id) => Ok(vec![]),
             TransactionQuery::MutatedObject(mutated_obj_id) => {
+                let indexer_seq_number = self
+                    .state
+                    .get_transaction_sequence_by_digest(cursor_str, is_descending)?;
                 self.state.get_transaction_digest_page_by_mutated_object(
                     mutated_obj_id.to_string(),
                     indexer_seq_number,
                     limit + 1,
-                    descending_order.unwrap_or_default(),
+                    is_descending,
                 )
             }
             TransactionQuery::FromAddress(sender_address) => {
+                let indexer_seq_number = self
+                    .state
+                    .get_transaction_sequence_by_digest(cursor_str, is_descending)?;
                 self.state.get_transaction_digest_page_by_sender_address(
                     sender_address.to_string(),
                     indexer_seq_number,
                     limit + 1,
-                    descending_order.unwrap_or_default(),
+                    is_descending,
                 )
             }
             TransactionQuery::ToAddress(recipient_address) => {
+                let recipient_seq_number = self
+                    .state
+                    .get_recipient_sequence_by_digest(cursor_str, is_descending)?;
                 self.state.get_transaction_digest_page_by_recipient_address(
                     recipient_address.to_string(),
-                    indexer_seq_number,
+                    recipient_seq_number,
                     limit + 1,
-                    descending_order.unwrap_or_default(),
+                    is_descending,
                 )
             }
         }?;
@@ -119,7 +138,7 @@ impl<S: IndexerStore> ReadApi<S> {
             .map(|digest| {
                 let txn_digest: Result<TransactionDigest, _> = digest.clone().parse();
                 txn_digest.map_err(|e| {
-                    IndexerError::JsonSerdeError(format!(
+                    IndexerError::SerdeError(format!(
                         "Failed to deserialize transaction digest: {:?} with error {:?}",
                         digest, e
                     ))
@@ -127,20 +146,33 @@ impl<S: IndexerStore> ReadApi<S> {
             })
             .collect::<Result<Vec<TransactionDigest>, IndexerError>>()?;
 
-        let next_cursor = txn_digests.get(limit).cloned();
+        let has_next_page = txn_digests.len() > limit;
         txn_digests.truncate(limit);
+        let next_cursor = txn_digests.last().cloned().map_or(cursor, Some);
 
         Ok(Page {
             data: txn_digests,
             next_cursor,
+            has_next_page,
         })
     }
 
-    async fn get_latest_checkpoint_sequence_number(&self) -> Result<i64, IndexerError> {
-        self.state.get_latest_checkpoint_sequence_number()
+    fn get_object_with_options(
+        &self,
+        object_id: ObjectID,
+        options: Option<SuiObjectDataOptions>,
+    ) -> Result<SuiObjectResponse, IndexerError> {
+        let read = self.state.get_object(object_id, None)?;
+        Ok((read, options.unwrap_or_default()).try_into()?)
     }
 
-    async fn get_checkpoint(&self, id: CheckpointId) -> Result<Checkpoint, IndexerError> {
+    fn get_latest_checkpoint_sequence_number(&self) -> Result<u64, IndexerError> {
+        self.state
+            .get_latest_checkpoint_sequence_number()
+            .map(|n| n as u64)
+    }
+
+    fn get_checkpoint(&self, id: CheckpointId) -> Result<Checkpoint, IndexerError> {
         let checkpoint = self.state.get_checkpoint(id)?;
         checkpoint.try_into()
     }
@@ -158,6 +190,35 @@ where
         self.fullnode.get_objects_owned_by_address(address).await
     }
 
+    async fn get_object_with_options(
+        &self,
+        object_id: ObjectID,
+        options: Option<SuiObjectDataOptions>,
+    ) -> RpcResult<SuiObjectResponse> {
+        if self
+            .method_to_be_forwarded
+            .contains(&"get_object_with_options".into())
+        {
+            return self
+                .fullnode
+                .get_object_with_options(object_id, options)
+                .await;
+        }
+
+        Ok(self.get_object_with_options(object_id, options)?)
+    }
+
+    async fn multi_get_object_with_options(
+        &self,
+        object_ids: Vec<ObjectID>,
+        options: Option<SuiObjectDataOptions>,
+    ) -> RpcResult<Vec<SuiObjectResponse>> {
+        return self
+            .fullnode
+            .multi_get_object_with_options(object_ids, options)
+            .await;
+    }
+
     async fn get_dynamic_fields(
         &self,
         parent_object_id: ObjectID,
@@ -169,15 +230,11 @@ where
             .await
     }
 
-    async fn get_object(&self, object_id: ObjectID) -> RpcResult<GetObjectDataResponse> {
-        self.fullnode.get_object(object_id).await
-    }
-
     async fn get_dynamic_field_object(
         &self,
         parent_object_id: ObjectID,
         name: DynamicFieldName,
-    ) -> RpcResult<GetObjectDataResponse> {
+    ) -> RpcResult<SuiObjectResponse> {
         self.fullnode
             .get_dynamic_field_object(parent_object_id, name)
             .await
@@ -190,7 +247,7 @@ where
         {
             return self.fullnode.get_total_transaction_number().await;
         }
-        self.get_total_transaction_number().await
+        Ok(self.get_total_transaction_number()?)
     }
 
     async fn get_transactions(
@@ -209,42 +266,52 @@ where
                 .get_transactions(query, cursor, limit, descending_order)
                 .await;
         }
-        self.get_transactions(query, cursor, limit, descending_order)
-            .await
+        Ok(self.get_transactions(query, cursor, limit, descending_order)?)
     }
 
-    async fn get_transactions_in_range(
+    async fn get_transactions_in_range_deprecated(
         &self,
         start: TxSequenceNumber,
         end: TxSequenceNumber,
     ) -> RpcResult<Vec<TransactionDigest>> {
-        self.fullnode.get_transactions_in_range(start, end).await
+        self.fullnode
+            .get_transactions_in_range_deprecated(start, end)
+            .await
     }
 
-    async fn get_transaction(
+    async fn get_transaction_with_options(
         &self,
         digest: TransactionDigest,
+        options: Option<SuiTransactionResponseOptions>,
     ) -> RpcResult<SuiTransactionResponse> {
         if self
             .method_to_be_forwarded
             .contains(&"get_transaction".to_string())
         {
-            return self.fullnode.get_transaction(digest).await;
+            return self
+                .fullnode
+                .get_transaction_with_options(digest, options)
+                .await;
         }
-        self.get_transaction(digest).await
+        Ok(self.get_transaction_with_options(&digest, options)?)
     }
 
-    async fn multi_get_transactions(
+    async fn multi_get_transactions_with_options(
         &self,
         digests: Vec<TransactionDigest>,
+        options: Option<SuiTransactionResponseOptions>,
     ) -> RpcResult<Vec<SuiTransactionResponse>> {
         if self
             .method_to_be_forwarded
-            .contains(&"muti_get_transactions".to_string())
+            .contains(&"multi_get_transactions_with_options".to_string())
         {
-            return self.fullnode.multi_get_transactions(digests).await;
+            return self
+                .fullnode
+                .multi_get_transactions_with_options(digests, options)
+                .await;
         }
-        self.multi_get_transactions(digests).await
+        self.multi_get_transactions_with_options(digests, options)
+            .await
     }
 
     async fn get_normalized_move_modules_by_package(
@@ -303,8 +370,21 @@ where
         &self,
         object_id: ObjectID,
         version: SequenceNumber,
-    ) -> RpcResult<GetPastObjectDataResponse> {
-        self.fullnode.try_get_past_object(object_id, version).await
+        options: Option<SuiObjectDataOptions>,
+    ) -> RpcResult<SuiPastObjectResponse> {
+        self.fullnode
+            .try_get_past_object(object_id, version, options)
+            .await
+    }
+
+    async fn try_multi_get_past_objects(
+        &self,
+        past_objects: Vec<SuiGetPastObjectRequest>,
+        options: Option<SuiObjectDataOptions>,
+    ) -> RpcResult<Vec<SuiPastObjectResponse>> {
+        self.fullnode
+            .try_multi_get_past_objects(past_objects, options)
+            .await
     }
 
     async fn get_latest_checkpoint_sequence_number(&self) -> RpcResult<CheckpointSequenceNumber> {
@@ -314,7 +394,7 @@ where
         {
             return self.fullnode.get_latest_checkpoint_sequence_number().await;
         }
-        Ok(self.get_latest_checkpoint_sequence_number().await? as u64)
+        Ok(self.get_latest_checkpoint_sequence_number()?)
     }
 
     async fn get_checkpoint(&self, id: CheckpointId) -> RpcResult<Checkpoint> {
@@ -324,50 +404,7 @@ where
         {
             return self.fullnode.get_checkpoint(id).await;
         }
-        Ok(self.get_checkpoint(id).await?)
-    }
-
-    // NOTE: checkpoint APIs below will be deprecated,
-    // thus skipping them regarding indexer native implementations.
-    async fn get_checkpoint_summary_by_digest(
-        &self,
-        digest: CheckpointDigest,
-    ) -> RpcResult<CheckpointSummary> {
-        self.fullnode.get_checkpoint_summary_by_digest(digest).await
-    }
-
-    async fn get_checkpoint_summary(
-        &self,
-        sequence_number: CheckpointSequenceNumber,
-    ) -> RpcResult<CheckpointSummary> {
-        self.fullnode.get_checkpoint_summary(sequence_number).await
-    }
-
-    async fn get_checkpoint_contents_by_digest(
-        &self,
-        digest: CheckpointContentsDigest,
-    ) -> RpcResult<CheckpointContents> {
-        self.fullnode
-            .get_checkpoint_contents_by_digest(digest)
-            .await
-    }
-
-    async fn get_checkpoint_contents(
-        &self,
-        sequence_number: CheckpointSequenceNumber,
-    ) -> RpcResult<CheckpointContents> {
-        self.fullnode.get_checkpoint_contents(sequence_number).await
-    }
-
-    async fn get_raw_object(&self, object_id: ObjectID) -> RpcResult<GetRawObjectDataResponse> {
-        self.fullnode.get_raw_object(object_id).await
-    }
-
-    async fn get_display_deprecated(
-        &self,
-        object_id: ObjectID,
-    ) -> RpcResult<BTreeMap<String, String>> {
-        self.fullnode.get_display_deprecated(object_id).await
+        Ok(self.get_checkpoint(id)?)
     }
 }
 

@@ -3,13 +3,10 @@
 
 import {
   Ed25519Keypair,
-  getTransactionEffects,
   JsonRpcProvider,
-  LocalTxnDataSerializer,
   RawSigner,
   Connection,
   devnetConnection,
-  getEvents,
 } from "@mysten/sui.js";
 import {
   WalletAdapter,
@@ -39,11 +36,7 @@ export class UnsafeBurnerWalletAdapter implements WalletAdapter {
       features: ["sui:signAndExecuteTransaction", "sui:signTransaction"],
       publicKey: this.#keypair.getPublicKey().toBytes(),
     });
-    this.#signer = new RawSigner(
-      this.#keypair,
-      this.#provider,
-      new LocalTxnDataSerializer(this.#provider)
-    );
+    this.#signer = new RawSigner(this.#keypair, this.#provider);
     this.connecting = false;
     this.connected = false;
 
@@ -70,6 +63,7 @@ export class UnsafeBurnerWalletAdapter implements WalletAdapter {
     async (transactionInput) => {
       return await this.#signer.signAndExecuteTransaction(
         transactionInput.transaction,
+        transactionInput.options?.contentOptions,
         transactionInput.options?.requestType
       );
     };

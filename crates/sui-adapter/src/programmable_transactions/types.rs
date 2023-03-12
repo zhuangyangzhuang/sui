@@ -12,7 +12,7 @@ use move_core_types::{
 use move_vm_types::loaded_data::runtime_types::Type;
 use serde::Deserialize;
 use sui_types::{
-    base_types::{ObjectID, SequenceNumber, SuiAddress},
+    base_types::{MoveObjectType, ObjectID, SequenceNumber, SuiAddress},
     coin::Coin,
     error::{ExecutionError, ExecutionErrorKind},
     messages::CommandArgumentError,
@@ -40,7 +40,7 @@ pub struct ExecutionResults {
     pub user_events: Vec<(ModuleId, StructTag, Vec<u8>)>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InputObjectMetadata {
     pub id: ObjectID,
     pub is_mutable_input: bool,
@@ -48,14 +48,14 @@ pub struct InputObjectMetadata {
     pub version: SequenceNumber,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InputValue {
     /// Used to remember the object ID and owner even if the value is taken
     pub object_metadata: Option<InputObjectMetadata>,
     pub inner: ResultValue,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ResultValue {
     /// This is used primarily for values that have `copy` but not `drop` as they must have been
     /// copied after the last borrow, otherwise we cannot consider the last "copy" to be instead
@@ -64,22 +64,22 @@ pub struct ResultValue {
     pub value: Option<Value>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum UsageKind {
     BorrowImm,
     BorrowMut,
     ByValue,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Object(ObjectValue),
     Raw(RawValueType, Vec<u8>),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ObjectValue {
-    pub type_: StructTag,
+    pub type_: MoveObjectType,
     pub has_public_transfer: bool,
     // true if it has been used in a public, non-entry Move call
     // In other words, false if all usages have been with non-Move comamnds or
@@ -88,13 +88,13 @@ pub struct ObjectValue {
     pub contents: ObjectContents,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum ObjectContents {
     Coin(Coin),
     Raw(Vec<u8>),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum RawValueType {
     Any,
     Loaded {
@@ -116,6 +116,7 @@ pub enum CommandKind<'a> {
     SplitCoin,
     MergeCoins,
     Publish,
+    Upgrade,
 }
 
 impl InputValue {
@@ -178,12 +179,12 @@ impl Value {
 
 impl ObjectValue {
     pub fn new(
-        type_: StructTag,
+        type_: MoveObjectType,
         has_public_transfer: bool,
         used_in_non_entry_move_call: bool,
         contents: &[u8],
     ) -> Result<Self, ExecutionError> {
-        let contents = if Coin::is_coin(&type_) {
+        let contents = if type_.is_coin() {
             ObjectContents::Coin(Coin::from_bcs_bytes(contents)?)
         } else {
             ObjectContents::Raw(contents.to_vec())
@@ -206,18 +207,15 @@ impl ObjectValue {
 
     pub fn from_move_object(object: &MoveObject) -> Result<Self, ExecutionError> {
         Self::new(
-            object.type_.clone(),
+            object.type_().clone(),
             object.has_public_transfer(),
             false,
             object.contents(),
         )
     }
 
-    pub fn coin(type_: StructTag, coin: Coin) -> Result<Self, ExecutionError> {
-        assert_invariant!(
-            Coin::is_coin(&type_),
-            "Cannot make a coin without a coin type"
-        );
+    pub fn coin(type_: MoveObjectType, coin: Coin) -> Result<Self, ExecutionError> {
+        assert_invariant!(type_.is_coin(), "Cannot make a coin without a coin type");
         Ok(Self {
             type_,
             has_public_transfer: true,
@@ -239,6 +237,10 @@ impl ObjectValue {
             ObjectContents::Coin(coin) => buf.extend(coin.to_bcs_bytes()),
         }
     }
+
+    pub fn into_type(self) -> MoveObjectType {
+        self.type_
+    }
 }
 
 pub trait TryFromValue: Sized {
@@ -255,7 +257,6 @@ impl TryFromValue for ObjectValue {
     fn try_from_value(value: Value) -> Result<Self, CommandArgumentError> {
         match value {
             Value::Object(o) => Ok(o),
-            // TODO support Any for dev inspect
             Value::Raw(RawValueType::Any, _) => Err(CommandArgumentError::TypeMismatch),
             Value::Raw(RawValueType::Loaded { .. }, _) => Err(CommandArgumentError::TypeMismatch),
         }

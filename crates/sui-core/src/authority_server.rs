@@ -255,7 +255,7 @@ impl ValidatorService {
             .map_err(|e| tonic::Status::internal(e.to_string()))?;
         let max_tx_size = epoch_store.protocol_config().max_tx_size();
         fp_ensure!(
-            tx_size <= max_tx_size,
+            tx_size as u64 <= max_tx_size,
             tonic::Status::resource_exhausted(format!(
                 "serialized transaction size ({tx_size}) exceeded maximum of {max_tx_size}"
             ))
@@ -297,6 +297,7 @@ impl ValidatorService {
         let epoch_store = state.load_epoch_store_one_call_per_task();
 
         let certificate = request.into_inner();
+
         let shared_object_tx = certificate.contains_shared_object();
 
         let _metrics_guard = if shared_object_tx {
@@ -312,8 +313,8 @@ impl ValidatorService {
         if let Some(signed_effects) =
             state.get_signed_effects_and_maybe_resign(&tx_digest, &epoch_store)?
         {
-            let events = if let Some(digest) = signed_effects.events_digest {
-                state.get_transaction_events(digest).await?
+            let events = if let Some(digest) = signed_effects.events_digest() {
+                state.get_transaction_events(*digest).await?
             } else {
                 TransactionEvents::default()
             };
@@ -341,7 +342,7 @@ impl ValidatorService {
                 .data()
                 .intent_message
                 .value
-                .kind
+                .kind()
                 .input_objects()
                 .map_err(SuiError::from)?
                 .into_iter()
@@ -367,8 +368,21 @@ impl ValidatorService {
             }
 
             let certificate = {
-                let _timer = metrics.cert_verification_latency.start_timer();
-                certificate.verify(epoch_store.committee())?
+                let cert_digest = certificate.certificate_digest();
+                if epoch_store
+                    .verified_cert_cache()
+                    .is_cert_verified(&cert_digest)
+                {
+                    VerifiedCertificate::new_unchecked(certificate)
+                } else {
+                    let _timer = metrics.cert_verification_latency.start_timer();
+                    // Note: verify verifies user sigs as well before caching cert.
+                    certificate.verify(epoch_store.committee()).tap_ok(|_| {
+                        epoch_store
+                            .verified_cert_cache()
+                            .cache_cert_verified(cert_digest)
+                    })?
+                }
             };
 
             // 3) All certificates are sent to consensus (at least by some authorities)
@@ -406,8 +420,8 @@ impl ValidatorService {
         let res = state.execute_certificate(&certificate, &epoch_store).await;
         match res {
             Ok(effects) => {
-                let events = if let Some(event_digest) = effects.events_digest {
-                    state.get_transaction_events(event_digest).await?
+                let events = if let Some(event_digest) = effects.events_digest() {
+                    state.get_transaction_events(*event_digest).await?
                 } else {
                     TransactionEvents::default()
                 };
@@ -490,25 +504,14 @@ impl Validator for ValidatorService {
         return Ok(tonic::Response::new(response));
     }
 
-    async fn committee_info(
-        &self,
-        request: tonic::Request<CommitteeInfoRequest>,
-    ) -> Result<tonic::Response<CommitteeInfoResponse>, tonic::Status> {
-        let request = request.into_inner();
-
-        let response = self.state.handle_committee_info_request(&request)?;
-
-        return Ok(tonic::Response::new(response));
-    }
-
     async fn get_system_state_object(
         &self,
         _request: tonic::Request<SystemStateRequest>,
     ) -> Result<tonic::Response<SuiSystemStateInnerBenchmark>, tonic::Status> {
-        let epoch_store = self.state.load_epoch_store_one_call_per_task();
-        let response = epoch_store
-            .system_state_object()
-            .clone()
+        let response = self
+            .state
+            .database
+            .get_sui_system_state_object()?
             .into_benchmark_version();
 
         return Ok(tonic::Response::new(response));

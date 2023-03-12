@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     marker::PhantomData,
 };
 
-use move_binary_format::errors::{Location, VMError};
+use move_binary_format::{
+    errors::{Location, VMError},
+    file_format::{CodeOffset, FunctionDefinitionIndex},
+};
 use move_core_types::language_storage::{ModuleId, StructTag, TypeTag};
 use move_vm_runtime::{move_vm::MoveVM, session::Session};
 use sui_framework::natives::object_runtime::{max_event_error, ObjectRuntime, RuntimeResults};
 use sui_protocol_config::ProtocolConfig;
 use sui_types::{
     balance::Balance,
-    base_types::{ObjectID, SequenceNumber, SuiAddress, TxContext},
+    base_types::{MoveObjectType, ObjectID, SequenceNumber, SuiAddress, TxContext},
     coin::Coin,
     error::{ExecutionError, ExecutionErrorKind},
     gas::SuiGasStatus,
@@ -23,7 +26,10 @@ use sui_types::{
     storage::{ObjectChange, SingleTxContext, Storage, WriteKind},
 };
 
-use crate::adapter::{missing_unwrapped_msg, new_session};
+use crate::{
+    adapter::{missing_unwrapped_msg, new_session},
+    execution_mode::ExecutionMode,
+};
 
 use super::types::*;
 
@@ -68,7 +74,7 @@ struct AdditionalWrite {
     /// The new owner of the object
     recipient: Owner,
     /// the type of the object,
-    type_: StructTag,
+    type_: MoveObjectType,
     /// if the object has public transfer or not, i.e. if it has store
     has_public_transfer: bool,
     /// contents of the object
@@ -86,7 +92,7 @@ where
         state_view: &'state S,
         tx_context: &'a mut TxContext,
         gas_status: &'a mut SuiGasStatus<'b>,
-        gas_coin: ObjectID,
+        gas_coin_opt: Option<ObjectID>,
         inputs: Vec<CallArg>,
     ) -> Result<Self, ExecutionError> {
         let mut object_owner_map = BTreeMap::new();
@@ -94,26 +100,39 @@ where
             .into_iter()
             .map(|call_arg| load_call_arg(state_view, &mut object_owner_map, call_arg))
             .collect::<Result<_, ExecutionError>>()?;
-        let mut gas = load_object(
-            state_view,
-            &mut object_owner_map,
-            /* imm override */ false,
-            gas_coin,
-        )?;
-        // subtract the max gas budget. This amount is off limits in the programmable transaction,
-        // so to mimic this "off limits" behavior, we act as if the coin has less balance than
-        // it really does
-        let Some(Value::Object(ObjectValue {
-            contents: ObjectContents::Coin(coin),
-            ..
-        })) = &mut gas.inner.value else {
-            invariant_violation!("Gas object should be a populated coin")
+        let gas = if let Some(gas_coin) = gas_coin_opt {
+            let mut gas = load_object(
+                state_view,
+                &mut object_owner_map,
+                /* imm override */ false,
+                gas_coin,
+            )?;
+            // subtract the max gas budget. This amount is off limits in the programmable transaction,
+            // so to mimic this "off limits" behavior, we act as if the coin has less balance than
+            // it really does
+            let Some(Value::Object(ObjectValue {
+                contents: ObjectContents::Coin(coin),
+                ..
+            })) = &mut gas.inner.value else {
+                invariant_violation!("Gas object should be a populated coin")
+            };
+            let max_gas_in_balance = gas_status.max_gax_budget_in_balance();
+            let Some(new_balance) = coin.balance.value().checked_sub(max_gas_in_balance) else {
+                invariant_violation!(
+                    "Transaction input checker should check that there is enough gas"
+                );
+            };
+            coin.balance = Balance::new(new_balance);
+            gas
+        } else {
+            InputValue {
+                object_metadata: None,
+                inner: ResultValue {
+                    last_usage_kind: None,
+                    value: None,
+                },
+            }
         };
-        let max_gas_in_balance = gas_status.max_gax_budget_in_balance();
-        let Some(new_balance) = coin.balance.value().checked_sub(max_gas_in_balance) else {
-            invariant_violation!("Transaction input checker should check that there is enough gas");
-        };
-        coin.balance = Balance::new(new_balance);
         let session = new_session(
             vm,
             state_view,
@@ -159,13 +178,20 @@ where
 
     /// Takes the user events from the runtime and tags them with the Move module of the function
     /// that was invoked for the command
-    pub fn take_user_events(&mut self, module_id: &ModuleId) -> Result<(), ExecutionError> {
+    pub fn take_user_events(
+        &mut self,
+        module_id: &ModuleId,
+        function: FunctionDefinitionIndex,
+        last_offset: CodeOffset,
+    ) -> Result<(), ExecutionError> {
         let object_runtime: &mut ObjectRuntime = self.session.get_native_extensions().get_mut();
         let events = object_runtime.take_user_events();
         let num_events = self.user_events.len() + events.len();
         let max_events = self.protocol_config.max_num_event_emit();
-        if num_events as u64 >= max_events {
-            let err = max_event_error(max_events).finish(Location::Module(module_id.clone()));
+        if num_events as u64 > max_events {
+            let err = max_event_error(max_events)
+                .at_code_offset(function, last_offset)
+                .finish(Location::Module(module_id.clone()));
             return Err(self.convert_vm_error(err));
         }
         let new_events = events
@@ -256,13 +282,7 @@ where
         if val_opt.is_none() {
             return Err(CommandArgumentError::InvalidUsageOfTakenValue);
         }
-        if matches!(
-            input_metadata_opt,
-            Some(InputObjectMetadata {
-                owner: Owner::Immutable,
-                ..
-            })
-        ) {
+        if input_metadata_opt.is_some() && !input_metadata_opt.unwrap().is_mutable_input {
             return Err(CommandArgumentError::InvalidObjectByMutRef);
         }
         V::try_from_value(val_opt.take().unwrap())
@@ -292,9 +312,16 @@ where
     }
 
     /// Restore an argument after being mutably borrowed
-    pub fn restore_arg(&mut self, arg: Argument, value: Value) -> Result<(), ExecutionError> {
+    pub fn restore_arg<Mode: ExecutionMode>(
+        &mut self,
+        updates: &mut Mode::ArgumentUpdates,
+        arg: Argument,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        Mode::add_argument_update(self, updates, arg, &value)?;
+        let was_mut_opt = self.borrowed.remove(&arg);
         assert_invariant!(
-            self.arg_is_mut_borrowed(&arg),
+            was_mut_opt.is_some() && was_mut_opt.unwrap(),
             "Should never restore a non-mut borrowed value. \
             The take+restore is an implementation detail of mutable references"
         );
@@ -325,7 +352,7 @@ where
     pub fn new_package(
         &mut self,
         modules: Vec<move_binary_format::CompiledModule>,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<ObjectID, ExecutionError> {
         // wrap the modules in an object, write it to the store
         let package_object = Object::new_package(
             modules,
@@ -333,8 +360,9 @@ where
             self.tx_context.digest(),
             self.protocol_config.max_move_package_size(),
         )?;
+        let id = package_object.id();
         self.new_packages.push(package_object);
-        Ok(())
+        Ok(id)
     }
 
     /// Finish a command: clearing the borrows and adding the results to the result vector
@@ -351,7 +379,7 @@ where
     }
 
     /// Determine the object changes and collect all user events
-    pub fn finish(self) -> Result<ExecutionResults, ExecutionError> {
+    pub fn finish<Mode: ExecutionMode>(self) -> Result<ExecutionResults, ExecutionError> {
         use sui_types::error::convert_vm_error;
         let Self {
             protocol_config,
@@ -375,59 +403,69 @@ where
         // Any object value that has not been taken (still has `Some` for it's value) needs to
         // written as it's value might have changed (and eventually it's sequence number will need
         // to increase)
+        let mut by_value_inputs = BTreeSet::new();
         let mut add_input_object_write = |input| {
             let InputValue {
                 object_metadata: object_metadata_opt,
                 inner: ResultValue { value, .. },
             } = input;
             let Some(object_metadata) = object_metadata_opt else { return };
-            let Some(Value::Object(object_value)) = value else { return };
-            if object_metadata.is_mutable_input {
-                add_additional_write(&mut additional_writes, object_metadata.owner, object_value);
-            }
+            let is_mutable_input = object_metadata.is_mutable_input;
+            let owner = object_metadata.owner;
+            let id = object_metadata.id;
             input_object_metadata.insert(object_metadata.id, object_metadata);
+            let Some(Value::Object(object_value)) = value else {
+                by_value_inputs.insert(id);
+                return
+            };
+            if is_mutable_input {
+                add_additional_write(&mut additional_writes, owner, object_value);
+            }
         };
-        let gas_id = gas.object_metadata.as_ref().unwrap().id;
+        let gas_id_opt = gas.object_metadata.as_ref().map(|info| info.id);
         add_input_object_write(gas);
         for input in inputs {
             add_input_object_write(input)
         }
         // check for unused values
-        for (i, command_result) in results.iter().enumerate() {
-            for (j, result_value) in command_result.iter().enumerate() {
-                let ResultValue {
-                    last_usage_kind,
-                    value,
-                } = result_value;
-                match value {
-                    None => (),
-                    Some(Value::Object(_)) => {
-                        return Err(ExecutionErrorKind::UnusedValueWithoutDrop {
-                            result_idx: i as u16,
-                            secondary_idx: j as u16,
+        // disable this check for dev inspect
+        if !Mode::allow_arbitrary_values() {
+            for (i, command_result) in results.iter().enumerate() {
+                for (j, result_value) in command_result.iter().enumerate() {
+                    let ResultValue {
+                        last_usage_kind,
+                        value,
+                    } = result_value;
+                    match value {
+                        None => (),
+                        Some(Value::Object(_)) => {
+                            return Err(ExecutionErrorKind::UnusedValueWithoutDrop {
+                                result_idx: i as u16,
+                                secondary_idx: j as u16,
+                            }
+                            .into())
                         }
-                        .into())
-                    }
-                    Some(Value::Raw(RawValueType::Any, _)) => (),
-                    Some(Value::Raw(RawValueType::Loaded { abilities, .. }, _)) => {
-                        // - nothing to check for drop
-                        // - if it does not have drop, but has copy,
-                        //   the last usage must be by value in order to "lie" and say that the
-                        //   last usage is actually a take instead of a clone
-                        // - Otherwise, an error
-                        if abilities.has_drop() {
-                        } else if abilities.has_copy()
-                            && !matches!(last_usage_kind, Some(UsageKind::ByValue))
-                        {
-                            let msg = "The value has copy, but not drop. \
+                        Some(Value::Raw(RawValueType::Any, _)) => (),
+                        Some(Value::Raw(RawValueType::Loaded { abilities, .. }, _)) => {
+                            // - nothing to check for drop
+                            // - if it does not have drop, but has copy,
+                            //   the last usage must be by value in order to "lie" and say that the
+                            //   last usage is actually a take instead of a clone
+                            // - Otherwise, an error
+                            if abilities.has_drop() {
+                            } else if abilities.has_copy()
+                                && !matches!(last_usage_kind, Some(UsageKind::ByValue))
+                            {
+                                let msg = "The value has copy, but not drop. \
                                 Its last usage must be by-value so it can be taken.";
-                            return Err(ExecutionError::new_with_source(
-                                ExecutionErrorKind::UnusedValueWithoutDrop {
-                                    result_idx: i as u16,
-                                    secondary_idx: j as u16,
-                                },
-                                msg,
-                            ));
+                                return Err(ExecutionError::new_with_source(
+                                    ExecutionErrorKind::UnusedValueWithoutDrop {
+                                        result_idx: i as u16,
+                                        secondary_idx: j as u16,
+                                    },
+                                    msg,
+                                ));
+                            }
                         }
                     }
                 }
@@ -439,23 +477,23 @@ where
             add_additional_write(&mut additional_writes, owner, object_value)
         }
         // Refund unused gas
-        refund_max_gas_budget(&mut additional_writes, gas_status, gas_id)?;
+        if let Some(gas_id) = gas_id_opt {
+            refund_max_gas_budget(&mut additional_writes, gas_status, gas_id)?;
+        }
 
         let (change_set, events, mut native_context_extensions) = session
             .finish_with_extensions()
             .map_err(|e| convert_vm_error(e, vm, state_view))?;
-        // Sui Move programs should never touch global state, so ChangeSet should be empty
-        assert_invariant!(change_set.accounts().is_empty(), "Change set must be empty");
+        // Sui Move programs should never touch global state, so resources should be empty
+        assert_invariant!(
+            change_set.resources().next().is_none(),
+            "Change set must be empty"
+        );
         // Sui Move no longer uses Move's internal event system
         assert_invariant!(events.is_empty(), "Events must be empty");
         let object_runtime: ObjectRuntime = native_context_extensions.remove();
         let new_ids = object_runtime.new_ids().clone();
         // tell the object runtime what input objects were taken and which were transferred
-        let by_value_inputs = input_object_metadata
-            .keys()
-            .copied()
-            .filter(|id| !additional_writes.contains_key(id))
-            .collect();
         let external_transfers = additional_writes.keys().copied().collect();
         let RuntimeResults {
             writes,
@@ -522,13 +560,13 @@ where
             !gas_status.is_unmetered(),
             protocol_config,
         );
-        for (id, (write_kind, recipient, ty, tag, value)) in writes {
+        for (id, (write_kind, recipient, ty, move_type, value)) in writes {
             let abilities = tmp_session
                 .get_type_abilities(&ty)
                 .map_err(|e| convert_vm_error(e, vm, state_view))?;
             let has_public_transfer = abilities.has_store();
             let layout = tmp_session
-                .get_type_layout(&TypeTag::Struct(Box::new(tag.clone())))
+                .get_type_layout(&move_type.clone().into())
                 .map_err(|e| convert_vm_error(e, vm, state_view))?;
             let bytes = value.simple_serialize(&layout).unwrap();
             // safe because has_public_transfer has been determined by the abilities
@@ -538,7 +576,7 @@ where
                     &input_object_metadata,
                     &loaded_child_objects,
                     id,
-                    tag,
+                    move_type,
                     has_public_transfer,
                     bytes,
                     write_kind,
@@ -693,10 +731,6 @@ fn load_call_arg<S: Storage>(
     Ok(match call_arg {
         CallArg::Pure(bytes) => InputValue::new_raw(RawValueType::Any, bytes),
         CallArg::Object(obj_arg) => load_object_arg(state_view, object_owner_map, obj_arg)?,
-        CallArg::ObjVec(_) => {
-            // protected by transaction input checker
-            invariant_violation!("ObjVec is not supported in programmable transactions")
-        }
     })
 }
 
@@ -755,10 +789,10 @@ fn refund_max_gas_budget(
     gas_status: &SuiGasStatus,
     gas_id: ObjectID,
 ) -> Result<(), ExecutionError> {
-    let Some(AdditionalWrite { bytes,.. }) =  additional_writes.get_mut(&gas_id) else {
+    let Some(AdditionalWrite { bytes,.. }) = additional_writes.get_mut(&gas_id) else {
         invariant_violation!("Gas object cannot be wrapped or destroyed")
     };
-    let Ok(mut coin) =  Coin::from_bcs_bytes(bytes) else {
+    let Ok(mut coin) = Coin::from_bcs_bytes(bytes) else {
         invariant_violation!("Gas object must be a coin")
     };
     let Some(new_balance) = coin
@@ -785,7 +819,7 @@ unsafe fn create_written_object(
     input_object_metadata: &BTreeMap<ObjectID, InputObjectMetadata>,
     loaded_child_objects: &BTreeMap<ObjectID, SequenceNumber>,
     id: ObjectID,
-    tag: StructTag,
+    type_: MoveObjectType,
     has_public_transfer: bool,
     contents: Vec<u8>,
     write_kind: WriteKind,
@@ -805,10 +839,13 @@ unsafe fn create_written_object(
         .map(|metadata| metadata.version)
         .or_else(|| loaded_child_version_opt.copied());
 
-    debug_assert!((write_kind == WriteKind::Mutate) == old_obj_ver.is_some());
+    debug_assert!(
+        (write_kind == WriteKind::Mutate) == old_obj_ver.is_some(),
+        "Inconsistent state: write_kind: {write_kind:?}, old ver: {old_obj_ver:?}"
+    );
 
     MoveObject::new_from_execution(
-        tag,
+        type_,
         has_public_transfer,
         old_obj_ver.unwrap_or_else(SequenceNumber::new),
         contents,

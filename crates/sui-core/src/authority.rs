@@ -8,13 +8,12 @@ use chrono::prelude::*;
 use fastcrypto::encoding::Base58;
 use fastcrypto::encoding::Encoding;
 use fastcrypto::traits::KeyPair;
-use itertools::izip;
 use itertools::Itertools;
 use move_binary_format::compatibility::Compatibility;
 use move_binary_format::CompiledModule;
 use move_core_types::account_address::AccountAddress;
 use move_core_types::identifier::Identifier;
-use move_core_types::language_storage::{ModuleId, StructTag};
+use move_core_types::language_storage::ModuleId;
 use move_core_types::parser::parse_struct_tag;
 use mysten_metrics::spawn_monitored_task;
 use parking_lot::Mutex;
@@ -24,18 +23,18 @@ use prometheus::{
     IntCounterVec, IntGauge, Registry,
 };
 use serde::de::DeserializeOwned;
-use std::path::PathBuf;
+use serde::Serialize;
+use shared_crypto::intent::{Intent, IntentScope};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
-use std::{collections::HashMap, pin::Pin};
-use sui_config::node::{AuthorityStorePruningConfig, StateSnapshotConfig};
+use std::{collections::HashMap, fs, pin::Pin, sync::Arc};
+use sui_config::node::{AuthorityStorePruningConfig, DBCheckpointConfig};
 use sui_types::crypto::AuthoritySignInfo;
 use sui_types::error::UserInputError;
-use sui_types::intent::Intent;
-use sui_types::intent::IntentScope;
 use sui_types::message_envelope::Message;
 use sui_types::parse_sui_struct_tag;
+use sui_types::sui_system_state::epoch_start_sui_system_state::EpochStartSystemStateTrait;
 use sui_types::sui_system_state::SuiSystemStateTrait;
 use sui_types::MOVE_STDLIB_OBJECT_ID;
 use sui_types::SUI_FRAMEWORK_OBJECT_ID;
@@ -57,7 +56,7 @@ use sui_json_rpc_types::{
     type_and_fields_from_move_struct, DevInspectResults, DryRunTransactionResponse, SuiEvent,
     SuiEventEnvelope, SuiMoveValue, SuiTransactionEvents,
 };
-use sui_macros::nondeterministic;
+use sui_macros::{fail_point, nondeterministic};
 use sui_protocol_config::{ProtocolConfig, SupportedProtocolVersions};
 use sui_storage::indexes::{ObjectIndexChanges, MAX_GET_OWNED_OBJECT_SIZE};
 use sui_storage::write_ahead_log::WriteAheadLog;
@@ -68,7 +67,7 @@ use sui_storage::{
 };
 use sui_types::committee::{EpochId, ProtocolVersion};
 use sui_types::crypto::{sha3_hash, AuthorityKeyPair, NetworkKeyPair, Signer};
-use sui_types::dynamic_field::{DynamicFieldInfo, DynamicFieldName, DynamicFieldType};
+use sui_types::dynamic_field::{DynamicFieldInfo, DynamicFieldName, DynamicFieldType, Field};
 use sui_types::event::{Event, EventID};
 use sui_types::gas::{GasCostSummary, GasPrice, SuiCostTable, SuiGasStatus};
 use sui_types::messages_checkpoint::{
@@ -76,7 +75,7 @@ use sui_types::messages_checkpoint::{
     CheckpointSummary, CheckpointTimestamp, VerifiedCheckpoint,
 };
 use sui_types::messages_checkpoint::{CheckpointRequest, CheckpointResponse};
-use sui_types::object::{MoveObject, Owner, PastObjectRead};
+use sui_types::object::{MoveObject, Owner, PastObjectRead, OBJECT_START_VERSION};
 use sui_types::query::{EventQuery, TransactionQuery};
 use sui_types::storage::{ObjectKey, WriteKind};
 use sui_types::sui_system_state::SuiSystemState;
@@ -93,12 +92,15 @@ use sui_types::{
     SUI_FRAMEWORK_ADDRESS,
 };
 
-use crate::authority::authority_per_epoch_store::{
-    AuthorityPerEpochStore, EpochStartConfiguration,
+use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
+pub use crate::authority::authority_per_epoch_store::{
+    VerifiedCertificateCache, VerifiedCertificateCacheMetrics,
 };
 use crate::authority::authority_per_epoch_store_pruner::AuthorityPerEpochStorePruner;
 use crate::authority::authority_store::{ExecutionLockReadGuard, InputKey, ObjectLockStatus};
 use crate::authority::authority_store_pruner::AuthorityStorePruner;
+use crate::authority::epoch_start_configuration::EpochStartConfigTrait;
+use crate::authority::epoch_start_configuration::EpochStartConfiguration;
 use crate::checkpoints::CheckpointStore;
 use crate::epoch::committee_store::CommitteeStore;
 use crate::epoch::epoch_metrics::EpochMetrics;
@@ -127,21 +129,22 @@ pub mod move_integration_tests;
 #[path = "unit_tests/gas_tests.rs"]
 mod gas_tests;
 
-#[cfg(test)]
-#[path = "unit_tests/tbls_tests.rs"]
-mod tbls_tests;
-
 pub mod authority_per_epoch_store;
 pub mod authority_per_epoch_store_pruner;
 
 pub mod authority_store_pruner;
 pub mod authority_store_tables;
 pub mod authority_store_types;
+pub mod epoch_start_configuration;
 
 pub(crate) mod authority_notify_read;
 pub(crate) mod authority_store;
 
 pub(crate) const MAX_TX_RECOVERY_RETRY: u32 = 3;
+
+// Reject a transaction if the number of certificates pending execution is above this threshold.
+// 20000 = 10k TPS * 2s resident time in transaction manager.
+pub(crate) const MAX_EXECUTION_QUEUE_LENGTH: usize = 20_000;
 
 // Reject a transaction if the number of pending transactions depending on the object
 // is above the threshold.
@@ -183,7 +186,7 @@ pub struct AuthorityMetrics {
     internal_execution_latency: Histogram,
     prepare_certificate_latency: Histogram,
     commit_certificate_latency: Histogram,
-    state_snapshot_checkpoint_latency: Histogram,
+    db_checkpoint_latency: Histogram,
 
     pub(crate) transaction_manager_num_enqueued_certificates: IntCounterVec,
     pub(crate) transaction_manager_num_missing_objects: IntGauge,
@@ -321,9 +324,9 @@ impl AuthorityMetrics {
                 registry,
             )
             .unwrap(),
-            state_snapshot_checkpoint_latency: register_histogram_with_registry!(
-                "state_snapshot_checkpoint_latency",
-                "Latency of checkpointing perpetual db",
+            db_checkpoint_latency: register_histogram_with_registry!(
+                "db_checkpoint_latency",
+                "Latency of checkpointing dbs",
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
             ).unwrap(),
@@ -448,8 +451,8 @@ pub struct AuthorityState {
     _objects_pruner: AuthorityStorePruner,
     _authority_per_epoch_pruner: AuthorityPerEpochStorePruner,
 
-    /// Take snapshot of the live object set at the end of epoch
-    enable_state_snapshot: bool,
+    /// Take db checkpoints af different dbs
+    db_checkpoint_config: DBCheckpointConfig,
 }
 
 /// The authority state encapsulates all state, drives execution, and ensures safety.
@@ -482,6 +485,13 @@ impl AuthorityState {
         transaction: VerifiedTransaction,
         epoch_store: &Arc<AuthorityPerEpochStore>,
     ) -> SuiResult<VerifiedSignedTransaction> {
+        let execution_queue_len = self.transaction_manager.execution_queue_len();
+        if execution_queue_len >= MAX_EXECUTION_QUEUE_LENGTH {
+            return Err(SuiError::TooManyTransactionsPendingExecution {
+                queue_len: execution_queue_len,
+                threshold: MAX_EXECUTION_QUEUE_LENGTH,
+            });
+        }
         let (_gas_status, input_objects) = transaction_input_checker::check_transaction_input(
             &self.database,
             epoch_store.as_ref(),
@@ -563,7 +573,7 @@ impl AuthorityState {
         }
 
         // Checks to see if the transaction has expired
-        if match &transaction.inner().data().transaction_data().expiration {
+        if match &transaction.inner().data().transaction_data().expiration() {
             TransactionExpiration::None => false,
             TransactionExpiration::Epoch(epoch) => *epoch < epoch_store.epoch(),
         } {
@@ -612,7 +622,7 @@ impl AuthorityState {
         let digest = *transaction.digest();
         debug!("execute_certificate_with_effects");
         fp_ensure!(
-            effects.data().transaction_digest == digest,
+            *effects.data().transaction_digest() == digest,
             SuiError::ErrorWhileProcessingCertificate {
                 err: "effects/tx digest mismatch".to_string()
             }
@@ -856,7 +866,7 @@ impl AuthorityState {
         epoch_store: &Arc<AuthorityPerEpochStore>,
     ) -> SuiResult {
         let input_object_count = inner_temporary_store.objects.len();
-        let shared_object_count = effects.shared_objects.len();
+        let shared_object_count = effects.shared_objects().len();
 
         // If commit_certificate returns an error, tx_guard will be dropped and the certificate
         // will be persisted in the log for later recovery.
@@ -906,9 +916,14 @@ impl AuthorityState {
         self.metrics
             .num_shared_objects
             .observe(shared_object_count as f64);
-        self.metrics
-            .batch_size
-            .observe(certificate.data().intent_message.value.kind.batch_size() as f64);
+        self.metrics.batch_size.observe(
+            certificate
+                .data()
+                .intent_message
+                .value
+                .kind()
+                .num_commands() as f64,
+        );
 
         Ok(())
     }
@@ -963,7 +978,7 @@ impl AuthorityState {
                 transaction_dependencies,
                 epoch_store.move_vm(),
                 gas_status,
-                &epoch_store.epoch_start_configuration().epoch_data(),
+                &epoch_store.epoch_start_config().epoch_data(),
                 epoch_store.protocol_config(),
             );
 
@@ -987,15 +1002,39 @@ impl AuthorityState {
     ) -> Result<DryRunTransactionResponse, anyhow::Error> {
         let epoch_store = self.load_epoch_store_one_call_per_task();
         if !self.is_fullnode(&epoch_store) {
-            return Err(anyhow!("dry-exec is only support on fullnodes"));
+            return Err(anyhow!("dry-exec is only supported on fullnodes"));
         }
 
-        let (gas_status, input_objects) = transaction_input_checker::check_transaction_input(
-            &self.database,
-            epoch_store.as_ref(),
-            &transaction,
-        )
-        .await?;
+        // make a gas object if one was not provided
+        let mut gas_object_refs = transaction.gas().to_vec();
+        let (gas_status, input_objects) = if transaction.gas().is_empty() {
+            let sender = transaction.sender();
+            let protocol_config = epoch_store.protocol_config();
+            let max_tx_gas = protocol_config.max_tx_gas();
+            let gas_object_id = ObjectID::random();
+            let gas_object = Object::new_move(
+                MoveObject::new_gas_coin(OBJECT_START_VERSION, gas_object_id, max_tx_gas),
+                Owner::AddressOwner(sender),
+                TransactionDigest::genesis(),
+            );
+            let gas_object_ref = gas_object.compute_object_reference();
+            gas_object_refs = vec![gas_object_ref];
+            transaction_input_checker::check_transaction_input_with_given_gas(
+                &self.database,
+                epoch_store.as_ref(),
+                &transaction,
+                gas_object,
+            )
+            .await?
+        } else {
+            transaction_input_checker::check_transaction_input(
+                &self.database,
+                epoch_store.as_ref(),
+                &transaction,
+            )
+            .await?
+        };
+
         let shared_object_refs = input_objects.filter_shared_objects();
 
         let transaction_dependencies = input_objects.transaction_dependencies();
@@ -1005,7 +1044,7 @@ impl AuthorityState {
             transaction_digest,
             epoch_store.protocol_config(),
         );
-        let (kind, signer, gas) = transaction.execution_parts();
+        let (kind, signer, _) = transaction.execution_parts();
         let move_vm = Arc::new(
             adapter::new_move_vm(
                 epoch_store.native_functions().clone(),
@@ -1019,16 +1058,16 @@ impl AuthorityState {
                 temporary_store,
                 kind,
                 signer,
-                &gas,
+                &gas_object_refs,
                 transaction_digest,
                 transaction_dependencies,
                 &move_vm,
                 gas_status,
-                &epoch_store.epoch_start_configuration().epoch_data(),
+                &epoch_store.epoch_start_config().epoch_data(),
                 epoch_store.protocol_config(),
             );
         Ok(DryRunTransactionResponse {
-            effects: effects.into(),
+            effects: effects.try_into()?,
             events: SuiTransactionEvents::try_from(
                 inner_temp_store.events,
                 epoch_store.module_cache().as_ref(),
@@ -1047,6 +1086,9 @@ impl AuthorityState {
         if !self.is_fullnode(&epoch_store) {
             return Err(anyhow!("dev-inspect is only supported on fullnodes"));
         }
+
+        transaction_kind.check_version_supported(epoch_store.protocol_config())?;
+
         let gas_price = gas_price.unwrap_or_else(|| epoch_store.reference_gas_price());
 
         let protocol_config = epoch_store.protocol_config();
@@ -1055,8 +1097,9 @@ impl AuthorityState {
         let storage_gas_price = protocol_config.storage_gas_price();
 
         let gas_object_id = ObjectID::random();
+        // give the gas object 2x the max gas to have coin balance to play with during execution
         let gas_object = Object::new_move(
-            MoveObject::new_gas_coin(SequenceNumber::new(), gas_object_id, max_tx_gas),
+            MoveObject::new_gas_coin(SequenceNumber::new(), gas_object_id, max_tx_gas * 2),
             Owner::AddressOwner(sender),
             TransactionDigest::genesis(),
         );
@@ -1080,7 +1123,7 @@ impl AuthorityState {
             gas_budget,
         );
         let transaction_digest = TransactionDigest::new(sha3_hash(&data));
-        let transaction_kind = data.kind;
+        let transaction_kind = data.into_kind();
         let transaction_dependencies = input_objects.transaction_dependencies();
         let temporary_store = TemporaryStore::new(
             self.database.clone(),
@@ -1113,7 +1156,7 @@ impl AuthorityState {
                 transaction_dependencies,
                 &move_vm,
                 gas_status,
-                &epoch_store.epoch_start_configuration().epoch_data(),
+                &epoch_store.epoch_start_config().epoch_data(),
                 protocol_config,
             );
         DevInspectResults::new(
@@ -1153,13 +1196,16 @@ impl AuthorityState {
                 .map(|o| o.object_id()),
             effects
                 .all_mutated()
+                .into_iter()
                 .map(|(obj_ref, owner, _kind)| (*obj_ref, *owner)),
             cert.data()
                 .intent_message
                 .value
-                .legacy_move_calls()
-                .iter()
-                .map(|mc| (mc.package, mc.module.clone(), mc.function.clone())),
+                .move_calls()
+                .into_iter()
+                .map(|(package, module, function)| {
+                    (*package, module.to_owned(), function.to_owned())
+                }),
             changes,
             digest,
             timestamp_ms,
@@ -1172,14 +1218,14 @@ impl AuthorityState {
         epoch_store: &Arc<AuthorityPerEpochStore>,
     ) -> Result<ObjectIndexChanges, SuiError> {
         let modified_at_version = effects
-            .modified_at_versions
+            .modified_at_versions()
             .iter()
             .cloned()
             .collect::<HashMap<_, _>>();
 
         let mut deleted_owners = vec![];
         let mut deleted_dynamic_fields = vec![];
-        for (id, _, _) in &effects.deleted {
+        for (id, _, _) in effects.deleted() {
             let old_version = modified_at_version.get(id).unwrap();
 
             match self.get_owner_at_version(id, *old_version)? {
@@ -1199,11 +1245,11 @@ impl AuthorityState {
             // For mutated objects, retrieve old owner and delete old index if there is a owner change.
             if let WriteKind::Mutate = kind {
                 let Some(old_version) = modified_at_version.get(id) else{
-                        error!("Error processing object owner index for tx [{:?}], cannot find modified at version for mutated object [{id}].", effects.transaction_digest);
+                        error!("Error processing object owner index for tx [{:?}], cannot find modified at version for mutated object [{id}].", effects.transaction_digest());
                         continue;
                     };
                 let Some(old_object) = self.database.get_object_by_key(id, *old_version)? else {
-                        error!("Error processing object owner index for tx [{:?}], cannot find object [{id}] at version [{old_version}].", effects.transaction_digest);
+                        error!("Error processing object owner index for tx [{:?}], cannot find object [{id}] at version [{old_version}].", effects.transaction_digest());
                         continue;
                     };
                 if &old_object.owner != owner {
@@ -1239,7 +1285,7 @@ impl AuthorityState {
                             digest: oref.2,
                             type_,
                             owner: *owner,
-                            previous_transaction: effects.transaction_digest,
+                            previous_transaction: *effects.transaction_digest(),
                         },
                     ));
                 }
@@ -1275,7 +1321,7 @@ impl AuthorityState {
             return Ok(None);
         };
         // We only index dynamic field objects
-        if !DynamicFieldInfo::is_dynamic_field(&move_object.type_) {
+        if !move_object.type_().is_dynamic_field() {
             return Ok(None);
         }
         let move_struct = move_object.to_move_struct_with_resolver(
@@ -1286,7 +1332,13 @@ impl AuthorityState {
         let (name_value, type_, object_id) =
             DynamicFieldInfo::parse_move_object(&move_struct).tap_err(|e| warn!("{e}"))?;
 
-        let name_type = DynamicFieldInfo::try_extract_field_name(&move_object.type_, &type_)?;
+        let name_type = move_object.type_().try_extract_field_name(&type_)?;
+
+        let bcs_name = bcs::to_bytes(&name_value.clone().undecorate()).map_err(|e| {
+            SuiError::ObjectSerializationError {
+                error: format!("{e}"),
+            }
+        })?;
 
         let name = DynamicFieldName {
             type_: name_type,
@@ -1308,6 +1360,7 @@ impl AuthorityState {
 
                 DynamicFieldInfo {
                     name,
+                    bcs_name,
                     type_,
                     object_type: object_type.to_string(),
                     object_id,
@@ -1317,8 +1370,9 @@ impl AuthorityState {
             }
             DynamicFieldType::DynamicField { .. } => DynamicFieldInfo {
                 name,
+                bcs_name,
                 type_,
-                object_type: move_object.type_.type_params[1].to_string(),
+                object_type: move_object.into_type().into_type_params()[1].to_string(),
                 object_id: o.id(),
                 version: o.version(),
                 digest: o.digest(),
@@ -1476,34 +1530,12 @@ impl AuthorityState {
         let contents = match &summary {
             Some(s) => self
                 .checkpoint_store
-                .get_checkpoint_contents(&s.content_digest())?,
+                .get_checkpoint_contents(&s.content_digest)?,
             None => None,
         };
         Ok(CheckpointResponse {
             checkpoint: summary,
             contents,
-        })
-    }
-
-    pub fn handle_committee_info_request(
-        &self,
-        request: &CommitteeInfoRequest,
-    ) -> SuiResult<CommitteeInfoResponse> {
-        let (epoch, committee) = match request.epoch {
-            Some(epoch) => (
-                epoch,
-                self.committee_store
-                    .get_committee(&epoch)?
-                    .ok_or(SuiError::MissingCommitteeAtEpoch(epoch))?,
-            ),
-            None => {
-                let committee = self.committee_store.get_latest_committee();
-                (committee.epoch, committee)
-            }
-        };
-        Ok(CommitteeInfoResponse {
-            epoch,
-            committee_info: committee.voting_rights,
         })
     }
 
@@ -1546,7 +1578,7 @@ impl AuthorityState {
         pruning_config: AuthorityStorePruningConfig,
         genesis_objects: &[Object],
         epoch_duration_ms: u64,
-        state_snapshot_config: &StateSnapshotConfig,
+        db_checkpoint_config: &DBCheckpointConfig,
     ) -> Arc<Self> {
         Self::check_protocol_version(supported_protocol_versions, epoch_store.protocol_version());
 
@@ -1570,10 +1602,10 @@ impl AuthorityState {
         let _objects_pruner = AuthorityStorePruner::new(
             store.perpetual_tables.clone(),
             checkpoint_store.clone(),
+            store.objects_lock_table.clone(),
             pruning_config,
             epoch_duration_ms,
         );
-
         let state = Arc::new(AuthorityState {
             name,
             secret,
@@ -1588,7 +1620,7 @@ impl AuthorityState {
             metrics,
             _objects_pruner,
             _authority_per_epoch_pruner,
-            enable_state_snapshot: state_snapshot_config.enabled,
+            db_checkpoint_config: db_checkpoint_config.clone(),
         });
 
         // Process tx recovery log first, so that checkpoint recovery (below)
@@ -1639,21 +1671,24 @@ impl AuthorityState {
                 None,
                 &genesis_committee,
                 genesis,
+                0,
             )
             .await
             .unwrap(),
         );
         let registry = Registry::new();
         let cache_metrics = Arc::new(ResolverMetrics::new(&registry));
+        let verified_cert_cache_metrics = VerifiedCertificateCacheMetrics::new(&registry);
         let epoch_store = AuthorityPerEpochStore::new(
             name,
-            genesis_committee.clone(),
+            Arc::new(genesis_committee.clone()),
             &path.join("store"),
             None,
             EpochMetrics::new(&registry),
-            Some(Default::default()),
+            EpochStartConfiguration::new_for_testing(),
             store.clone(),
             cache_metrics,
+            verified_cert_cache_metrics,
         );
 
         let epochs = Arc::new(CommitteeStore::new(
@@ -1679,7 +1714,7 @@ impl AuthorityState {
             AuthorityStorePruningConfig::default(),
             genesis.objects(),
             10000,
-            &StateSnapshotConfig::default(),
+            &DBCheckpointConfig::default(),
         )
         .await;
 
@@ -1804,7 +1839,9 @@ impl AuthorityState {
     ) -> SuiResult<Arc<AuthorityPerEpochStore>> {
         Self::check_protocol_version(
             supported_protocol_versions,
-            epoch_start_configuration.protocol_version(),
+            epoch_start_configuration
+                .epoch_start_state()
+                .protocol_version(),
         );
 
         self.committee_store.insert_new_committee(&new_committee)?;
@@ -1812,10 +1849,16 @@ impl AuthorityState {
         let mut execution_lock = db.execution_lock_for_reconfiguration().await;
         self.revert_uncommitted_epoch_transactions(cur_epoch_store)
             .await?;
-        if self.enable_state_snapshot {
-            let _checkpointed_db_path = self.checkpoint_perpetual_db()?;
-            // TODO: Start a background task to persist live object set in
-            // checkpointed db to canonical storage format
+        if let Some(checkpoint_path) = &self.db_checkpoint_config.checkpoint_path {
+            if self
+                .db_checkpoint_config
+                .perform_db_checkpoints_at_epoch_end
+            {
+                let current_epoch = cur_epoch_store.epoch();
+                let epoch_checkpoint_path =
+                    checkpoint_path.join(format!("epoch_{}", current_epoch));
+                self.checkpoint_all_dbs(&epoch_checkpoint_path, cur_epoch_store)?;
+            }
         }
         let new_epoch = new_committee.epoch;
         let new_epoch_store = self
@@ -1836,6 +1879,45 @@ impl AuthorityState {
 
     pub fn current_epoch_for_testing(&self) -> EpochId {
         self.epoch_store_for_testing().epoch()
+    }
+
+    pub fn checkpoint_all_dbs(
+        &self,
+        checkpoint_path: &Path,
+        cur_epoch_store: &AuthorityPerEpochStore,
+    ) -> SuiResult {
+        let _metrics_guard = self.metrics.db_checkpoint_latency.start_timer();
+        let current_epoch = cur_epoch_store.epoch();
+
+        if checkpoint_path.exists() {
+            info!("Skipping db checkpoint as it already exists for epoch: {current_epoch}");
+            return Ok(());
+        }
+
+        let checkpoint_path_tmp = checkpoint_path.with_extension("tmp");
+        let store_checkpoint_path_tmp = checkpoint_path_tmp.join("store");
+
+        if checkpoint_path_tmp.exists() {
+            fs::remove_dir_all(&checkpoint_path_tmp)
+                .map_err(|e| SuiError::FileIOError(e.to_string()))?;
+        }
+
+        fs::create_dir_all(&checkpoint_path_tmp)
+            .map_err(|e| SuiError::FileIOError(e.to_string()))?;
+        fs::create_dir(&store_checkpoint_path_tmp)
+            .map_err(|e| SuiError::FileIOError(e.to_string()))?;
+
+        self.database
+            .perpetual_tables
+            .checkpoint_db(&store_checkpoint_path_tmp.join("perpetual"))?;
+        self.committee_store
+            .checkpoint_db(&checkpoint_path_tmp.join("epochs"))?;
+        self.checkpoint_store
+            .checkpoint_db(&checkpoint_path_tmp.join("checkpoints"))?;
+
+        fs::rename(checkpoint_path_tmp, checkpoint_path)
+            .map_err(|e| SuiError::FileIOError(e.to_string()))?;
+        Ok(())
     }
 
     /// Load the current epoch store. This can change during reconfiguration. To ensure that
@@ -1882,6 +1964,22 @@ impl AuthorityState {
     #[cfg(test)]
     pub fn get_sui_system_state_object_for_testing(&self) -> SuiResult<SuiSystemState> {
         self.database.get_sui_system_state_object()
+    }
+
+    pub fn get_transaction_checkpoint_sequence(
+        &self,
+        digest: &TransactionDigest,
+    ) -> SuiResult<Option<(EpochId, CheckpointSequenceNumber)>> {
+        self.database.get_transaction_checkpoint(digest)
+    }
+
+    pub fn get_checkpoint_by_sequence_number(
+        &self,
+        sequence_number: CheckpointSequenceNumber,
+    ) -> SuiResult<Option<VerifiedCheckpoint>> {
+        Ok(self
+            .checkpoint_store
+            .get_checkpoint_by_sequence_number(sequence_number)?)
     }
 
     pub fn get_transaction_checkpoint(
@@ -1932,7 +2030,7 @@ impl AuthorityState {
         }
     }
 
-    async fn get_move_object<T>(&self, object_id: &ObjectID) -> SuiResult<T>
+    pub async fn get_move_object<T>(&self, object_id: &ObjectID) -> SuiResult<T>
     where
         T: DeserializeOwned,
     {
@@ -1948,6 +2046,21 @@ impl AuthorityState {
                 error: format!("Provided object : [{object_id}] is not a Move object."),
             })
         }
+    }
+
+    /// This function read the dynamic fields of a Table and return the deserialized value for the key.
+    pub async fn read_table_value<K, V>(&self, table: ObjectID, key: &K) -> Option<V>
+    where
+        K: DeserializeOwned + Serialize,
+        V: DeserializeOwned,
+    {
+        let key_bcs = bcs::to_bytes(key).ok()?;
+        let df = self
+            .get_dynamic_fields_iterator(table, None)
+            .ok()?
+            .find(|df| key_bcs == df.bcs_name)?;
+        let field: Field<K, V> = self.get_move_object(&df.object_id).await.ok()?;
+        Some(field.value)
     }
 
     /// This function aims to serve rpc reads on past objects and
@@ -2059,14 +2172,17 @@ impl AuthorityState {
     pub async fn get_move_objects<T>(
         &self,
         owner: SuiAddress,
-        type_: &StructTag,
+        type_: MoveObjectType,
     ) -> SuiResult<Vec<T>>
     where
         T: DeserializeOwned,
     {
         let object_ids = self
             .get_owner_objects_iterator(owner)?
-            .filter(move |o| Self::matches_type(&ObjectType::Struct(type_.clone()), &o.type_))
+            .filter(|o| match &o.type_ {
+                ObjectType::Struct(s) => Self::matches_type_fuzzy_generics(&type_, s),
+                ObjectType::Package => false,
+            })
             .map(|info| info.object_id);
         let mut move_objects = vec![];
         for id in object_ids {
@@ -2075,27 +2191,36 @@ impl AuthorityState {
         Ok(move_objects)
     }
 
-    fn matches_type(type_: &ObjectType, other_type: &ObjectType) -> bool {
-        match (type_, other_type) {
-            (ObjectType::Package, ObjectType::Package) => true,
-            (ObjectType::Struct(type_), ObjectType::Struct(other_type)) => {
-                type_.address == other_type.address
-                    && type_.module == other_type.module
-                    && type_.name == other_type.name
-                    && (type_.type_params.is_empty() || type_.type_params == other_type.type_params)
-            }
-            _ => false,
-        }
+    // TODO: should be in impl MoveType
+    fn matches_type_fuzzy_generics(type_: &MoveObjectType, other_type: &MoveObjectType) -> bool {
+        type_.address() == other_type.address()
+                    && type_.module() == other_type.module()
+                    && type_.name() == other_type.name()
+                    // TODO: is_empty() looks like a bug here. I think the intention is to support "fuzzy matching" where `get_move_objects`
+                    // leaves type_params unspecified, but I don't actually see any call sites taking advantage of this
+                    && (type_.type_params().is_empty() || type_.type_params() == other_type.type_params())
     }
 
     pub fn get_dynamic_fields(
         &self,
         owner: ObjectID,
+        // exclusive cursor if `Some`, otherwise start from the beginning
         cursor: Option<ObjectID>,
         limit: usize,
     ) -> SuiResult<Vec<DynamicFieldInfo>> {
+        Ok(self
+            .get_dynamic_fields_iterator(owner, cursor)?
+            .take(limit)
+            .collect())
+    }
+
+    pub fn get_dynamic_fields_iterator(
+        &self,
+        owner: ObjectID,
+        cursor: Option<ObjectID>,
+    ) -> SuiResult<impl Iterator<Item = DynamicFieldInfo> + '_> {
         if let Some(indexes) = &self.indexes {
-            indexes.get_dynamic_fields(owner, cursor, limit)
+            indexes.get_dynamic_fields_iterator(owner, cursor)
         } else {
             Err(SuiError::IndexStoreNotAvailable)
         }
@@ -2117,12 +2242,13 @@ impl AuthorityState {
         Ok(self.get_indexes()?.next_sequence_number())
     }
 
-    pub fn get_transactions_in_range(
+    pub fn get_transactions_in_range_deprecated(
         &self,
         start: TxSequenceNumber,
         end: TxSequenceNumber,
     ) -> Result<Vec<(TxSequenceNumber, TransactionDigest)>, anyhow::Error> {
-        self.get_indexes()?.get_transactions_in_range(start, end)
+        self.get_indexes()?
+            .get_transactions_in_range_deprecated(start, end)
     }
 
     pub fn get_recent_transactions(
@@ -2144,44 +2270,57 @@ impl AuthorityState {
         }
     }
 
-    pub async fn multi_get_transactions(
+    pub async fn get_executed_transaction(
+        &self,
+        digest: TransactionDigest,
+    ) -> Result<VerifiedTransaction, anyhow::Error> {
+        let transaction = self.database.get_transaction(&digest)?;
+        transaction.ok_or_else(|| anyhow!(SuiError::TransactionNotFound { digest }))
+    }
+
+    pub async fn get_executed_effects(
+        &self,
+        digest: TransactionDigest,
+    ) -> Result<TransactionEffects, anyhow::Error> {
+        let effects = self.database.get_executed_effects(&digest)?;
+        effects.ok_or_else(|| anyhow!(SuiError::TransactionNotFound { digest }))
+    }
+
+    pub async fn multi_get_executed_transactions(
         &self,
         digests: &[TransactionDigest],
-    ) -> Result<VerifiedTransactionBatch, anyhow::Error> {
-        let transactions = self.database.multi_get_transactions(digests)?;
-        let effects = self.database.multi_get_executed_effects(digests)?;
-        let checkpoints = self.database.multi_get_transaction_checkpoint(digests)?;
+    ) -> Result<Vec<Option<VerifiedTransaction>>, anyhow::Error> {
+        Ok(self.database.multi_get_transactions(digests)?)
+    }
 
-        let mut events_digests: Vec<TransactionEventsDigest> = vec![];
+    pub async fn multi_get_executed_effects(
+        &self,
+        digests: &[TransactionDigest],
+    ) -> Result<Vec<Option<TransactionEffects>>, anyhow::Error> {
+        Ok(self.database.multi_get_executed_effects(digests)?)
+    }
 
-        for effect in effects.iter() {
-            match effect {
-                Some(eff) => events_digests.push(eff.events_digest.unwrap()),
-                _ => continue,
-            }
-        }
+    pub async fn multi_get_transaction_checkpoint(
+        &self,
+        digests: &[TransactionDigest],
+    ) -> Result<Vec<Option<(EpochId, CheckpointSequenceNumber)>>, anyhow::Error> {
+        Ok(self.database.multi_get_transaction_checkpoint(digests)?)
+    }
 
-        let events = self.database.multi_get_events(events_digests.as_slice())?;
+    pub fn multi_get_events(
+        &self,
+        digests: &[TransactionEventsDigest],
+    ) -> Result<Vec<Option<TransactionEvents>>, anyhow::Error> {
+        Ok(self.database.multi_get_events(digests)?)
+    }
 
-        let mut missed_digests = vec![];
-        let mut response: VerifiedTransactionBatch = vec![];
-
-        for data in izip!(digests, transactions, effects, events, checkpoints) {
-            match data {
-                (_, Some(tx), Some(effect), Some(event), cp) => {
-                    response.push((tx, effect, event, cp))
-                }
-                (digest, _, _, _, _) => missed_digests.push(*digest),
-            }
-        }
-
-        if !missed_digests.is_empty() {
-            Err(anyhow!(SuiError::TransactionsNotFound {
-                digests: missed_digests
-            }))
-        } else {
-            Ok(response)
-        }
+    pub fn multi_get_checkpoint_by_sequence_number(
+        &self,
+        sequence_numbers: &[CheckpointSequenceNumber],
+    ) -> SuiResult<Vec<Option<VerifiedCheckpoint>>> {
+        Ok(self
+            .checkpoint_store
+            .multi_get_checkpoint_by_sequence_number(sequence_numbers)?)
     }
 
     pub async fn get_transaction_events(
@@ -2203,6 +2342,7 @@ impl AuthorityState {
     pub fn get_transactions(
         &self,
         query: TransactionQuery,
+        // exclusive cursor if `Some`, otherwise start from the beginning
         cursor: Option<TransactionDigest>,
         limit: Option<usize>,
         reverse: bool,
@@ -2231,7 +2371,7 @@ impl AuthorityState {
             .get_checkpoint_store()
             .get_checkpoint_by_sequence_number(sequence_number)?;
         match verified_checkpoint {
-            Some(verified_checkpoint) => Ok(verified_checkpoint.into_inner().summary),
+            Some(verified_checkpoint) => Ok(verified_checkpoint.into_inner().into_data()),
             None => Err(anyhow!(
                 "Verified checkpoint not found for sequence number {}",
                 sequence_number
@@ -2247,7 +2387,7 @@ impl AuthorityState {
             .get_checkpoint_store()
             .get_checkpoint_by_digest(&digest)?;
         match verified_checkpoint {
-            Some(verified_checkpoint) => Ok(verified_checkpoint.into_inner().summary),
+            Some(verified_checkpoint) => Ok(verified_checkpoint.into_inner().into_data()),
             None => Err(anyhow!(
                 "Verified checkpoint not found for digest: {}",
                 Base58::encode(digest)
@@ -2273,7 +2413,7 @@ impl AuthorityState {
             .get_checkpoint_by_sequence_number(sequence_number)?;
         match verified_checkpoint {
             Some(verified_checkpoint) => {
-                let content_digest = verified_checkpoint.into_inner().content_digest();
+                let content_digest = verified_checkpoint.into_inner().content_digest;
                 self.get_checkpoint_contents(content_digest)
             }
             None => Err(anyhow!(
@@ -2300,6 +2440,7 @@ impl AuthorityState {
     pub async fn query_events(
         &self,
         query: EventQuery,
+        // exclusive cursor if `Some`, otherwise start from the beginning
         cursor: Option<EventID>,
         limit: usize,
         descending: bool,
@@ -2307,7 +2448,7 @@ impl AuthorityState {
         let es = self.get_event_store().ok_or(SuiError::NoEventStore)?;
 
         //Get the tx_num from tx_digest
-        let (tx_num, event_num) = if let Some(cursor) = cursor {
+        let (tx_num, event_num) = if let Some(cursor) = cursor.as_ref() {
             let tx_seq = self
                 .get_indexes()?
                 .get_transaction_seq(&cursor.tx_digest)?
@@ -2319,7 +2460,8 @@ impl AuthorityState {
             (0, 0)
         };
 
-        let stored_events = match query {
+        let limit = limit + 1;
+        let mut stored_events = match query {
             EventQuery::All => es.all_events(tx_num, event_num, limit, descending).await?,
             EventQuery::Transaction(digest) => {
                 es.events_by_transaction(digest, tx_num, event_num, limit, descending)
@@ -2368,6 +2510,15 @@ impl AuthorityState {
                     .await?
             }
         };
+        // skip one event if exclusive cursor is provided,
+        // otherwise truncate to the original limit.
+        if cursor.is_some() {
+            if !stored_events.is_empty() {
+                stored_events.remove(0);
+            }
+        } else {
+            stored_events.truncate(limit - 1);
+        }
         let mut events = StoredEvent::into_event_envelopes(stored_events)?;
         // populate parsed json event
         for event in &mut events {
@@ -2398,6 +2549,15 @@ impl AuthorityState {
             .insert_genesis_object(object)
             .await
             .expect("Cannot insert genesis object")
+    }
+
+    pub async fn insert_genesis_objects(&self, objects: &[Object]) {
+        futures::future::join_all(
+            objects
+                .iter()
+                .map(|o| self.insert_genesis_object(o.clone())),
+        )
+        .await;
     }
 
     pub fn get_certified_transaction(
@@ -2432,8 +2592,8 @@ impl AuthorityState {
         {
             if let Some(transaction) = self.database.get_transaction(transaction_digest)? {
                 let cert_sig = epoch_store.get_transaction_cert_sig(transaction_digest)?;
-                let events = if let Some(digest) = effects.events_digest {
-                    self.database.get_events(&digest)?
+                let events = if let Some(digest) = effects.events_digest() {
+                    self.database.get_events(digest)?
                 } else {
                     TransactionEvents::default()
                 };
@@ -2477,7 +2637,7 @@ impl AuthorityState {
         effects: TransactionEffects,
         epoch_store: &Arc<AuthorityPerEpochStore>,
     ) -> Result<VerifiedSignedTransactionEffects, SuiError> {
-        let tx_digest = effects.transaction_digest;
+        let tx_digest = *effects.transaction_digest();
         let signed_effects = match epoch_store.get_effects_signature(&tx_digest)? {
             Some(sig) if sig.epoch == epoch_store.epoch() => {
                 SignedTransactionEffects::new_from_data_and_sig(effects, sig)
@@ -2563,7 +2723,7 @@ impl AuthorityState {
         // For now write transactions after because if we write before, there is a chance the lock can fail
         // and this can cause invalid transactions to be inserted in the table.
         // https://github.com/MystenLabs/sui/issues/1990
-        epoch_store.insert_transaction(transaction)?;
+        epoch_store.insert_signed_transaction(transaction)?;
 
         Ok(())
     }
@@ -3052,7 +3212,7 @@ impl AuthorityState {
         );
         epoch_store.record_is_safe_mode_metric(system_obj.safe_mode());
         // The change epoch transaction cannot fail to execute.
-        assert!(effects.status.is_ok());
+        assert!(effects.status().is_ok());
         Ok((system_obj, effects))
     }
 
@@ -3102,35 +3262,24 @@ impl AuthorityState {
         epoch_start_configuration: EpochStartConfiguration,
     ) -> SuiResult<Arc<AuthorityPerEpochStore>> {
         let new_epoch = new_committee.epoch;
-        info!(new_epoch = ?new_committee.epoch, "re-opening AuthorityEpochTables for new epoch");
+        info!(new_epoch = ?new_epoch, "re-opening AuthorityEpochTables for new epoch");
         assert_eq!(
-            epoch_start_configuration.system_state.epoch(),
+            epoch_start_configuration.epoch_start_state().epoch(),
             new_committee.epoch
         );
+        self.db()
+            .set_epoch_start_configuration(&epoch_start_configuration)
+            .await?;
+        fail_point!("before-open-new-epoch-store");
         let new_epoch_store = cur_epoch_store.new_at_next_epoch(
             self.name,
             new_committee,
             epoch_start_configuration,
             self.db(),
         );
-        self.db().perpetual_tables.set_recovery_epoch(new_epoch)?;
         self.epoch_store.store(new_epoch_store.clone());
         cur_epoch_store.epoch_terminated().await;
         Ok(new_epoch_store)
-    }
-
-    pub fn checkpoint_perpetual_db(&self) -> SuiResult<PathBuf> {
-        let _metrics_guard = self.metrics.state_snapshot_checkpoint_latency.start_timer();
-        let checkpoint_path = PathBuf::from(format!(
-            "perpetual_store_snapshot_epoch_{}",
-            self.db().perpetual_tables.get_recovery_epoch_at_restart()?
-        ));
-        self.database
-            .perpetual_tables
-            .objects
-            .rocksdb
-            .checkpoint(&checkpoint_path)
-            .map_err(SuiError::StorageError)
     }
 
     #[cfg(test)]

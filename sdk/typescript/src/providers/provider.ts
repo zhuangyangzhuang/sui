@@ -1,11 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+import { Transaction } from '../builder';
 import { SerializedSignature } from '../cryptography/signature';
 import { HttpHeaders } from '../rpc/client';
-import { UnserializedSignableTransaction } from '../signers/txn-data-serializers/txn-data-serializer';
 import {
-  GetObjectDataResponse,
+  SuiObjectResponse,
   SuiObjectInfo,
   GatewayTxSeqNumber,
   GetTxnDigestsResponse,
@@ -32,20 +32,19 @@ import {
   Order,
   CoinMetadata,
   DevInspectResults,
-  SuiSystemState,
   DelegatedStake,
-  ValidatorMetaData,
   PaginatedCoins,
   CoinBalance,
   CoinSupply,
-  CheckpointSummary,
-  CheckpointContents,
   CheckpointDigest,
-  CheckPointContentsDigest,
   Checkpoint,
   CommitteeInfo,
   DryRunTransactionResponse,
   SuiTransactionResponse,
+  SuiObjectDataOptions,
+  SuiSystemStateSummary,
+  CoinStruct,
+  SuiTransactionResponseOptions,
 } from '../types';
 
 import { DynamicFieldName, DynamicFieldPage } from '../types/dynamic_fields';
@@ -88,37 +87,37 @@ export abstract class Provider {
    * @param cursor optional paging cursor
    * @param limit maximum number of items per page
    */
-  abstract getCoins(
-    owner: SuiAddress,
-    coinType: string | null,
-    cursor: ObjectId | null,
-    limit: number | null,
-  ): Promise<PaginatedCoins>;
+  abstract getCoins(input: {
+    owner: SuiAddress;
+    coinType?: string | null;
+    cursor?: ObjectId | null;
+    limit?: number | null;
+  }): Promise<PaginatedCoins>;
 
   /**
    * Get all Coin objects owned by an address.
    * @param cursor optional paging cursor
    * @param limt maximum number of items per page
    */
-  abstract getAllCoins(
-    owner: SuiAddress,
-    cursor: ObjectId | null,
-    limit: number | null,
-  ): Promise<PaginatedCoins>;
+  abstract getAllCoins(input: {
+    owner: SuiAddress;
+    cursor?: ObjectId | null;
+    limit?: number | null;
+  }): Promise<PaginatedCoins>;
 
   /**
    * Get the total coin balance for one coin type, owned by the address owner.
    * @param coinType optional fully qualified type names for the coin (e.g., 0x168da5bf1f48dafc111b0a488fa454aca95e0b5e::usdc::USDC), default to 0x2::sui::SUI if not specified.
    */
-  abstract getBalance(
-    owner: SuiAddress,
-    coinType: string | null,
-  ): Promise<CoinBalance>;
+  abstract getBalance(input: {
+    owner: SuiAddress;
+    coinType?: string | null;
+  }): Promise<CoinBalance>;
 
   /**
    * Get the total coin balance for all coin type, owned by the address owner.
    */
-  abstract getAllBalances(owner: SuiAddress): Promise<CoinBalance[]>;
+  abstract getAllBalances(input: { owner: SuiAddress }): Promise<CoinBalance[]>;
 
   /**
    * Fetch CoinMetadata for a given coin type
@@ -126,13 +125,13 @@ export abstract class Provider {
    * 0x168da5bf1f48dafc111b0a488fa454aca95e0b5e::usdc::USDC)
    *
    */
-  abstract getCoinMetadata(coinType: string): Promise<CoinMetadata>;
+  abstract getCoinMetadata(input: { coinType: string }): Promise<CoinMetadata>;
 
   /**
    *  Fetch total supply for a coin
    * @param coinType fully qualified type names for the coin (e.g., 0x168da5bf1f48dafc111b0a488fa454aca95e0b5e::usdc::USDC), default to 0x2::sui::SUI if not specified.
    */
-  abstract getTotalSupply(coinType: string): Promise<CoinSupply>;
+  abstract getTotalSupply(input: { coinType: string }): Promise<CoinSupply>;
 
   // Objects
   /**
@@ -149,21 +148,6 @@ export abstract class Provider {
   ): Promise<SuiObjectInfo[]>;
 
   /**
-   * Convenience method for getting all gas objects(SUI Tokens) owned by an address
-   */
-  abstract getGasObjectsOwnedByAddress(
-    _address: string,
-  ): Promise<SuiObjectInfo[]>;
-
-  /**
-   * @deprecated The method should not be used
-   */
-  abstract getCoinBalancesOwnedByAddress(
-    address: string,
-    typeArg?: string,
-  ): Promise<GetObjectDataResponse[]>;
-
-  /**
    * Convenience method for select coin objects that has a balance greater than or equal to `amount`
    *
    * @param amount coin balance
@@ -176,7 +160,7 @@ export abstract class Provider {
     amount: bigint,
     typeArg: string,
     exclude: ObjectId[],
-  ): Promise<GetObjectDataResponse[]>;
+  ): Promise<CoinStruct[]>;
 
   /**
    * Convenience method for select a minimal set of coin objects that has a balance greater than
@@ -193,12 +177,15 @@ export abstract class Provider {
     amount: bigint,
     typeArg: string,
     exclude: ObjectId[],
-  ): Promise<GetObjectDataResponse[]>;
+  ): Promise<CoinStruct[]>;
 
   /**
    * Get details about an object
    */
-  abstract getObject(objectId: string): Promise<GetObjectDataResponse>;
+  abstract getObject(
+    objectId: string,
+    options?: SuiObjectDataOptions,
+  ): Promise<SuiObjectResponse>;
 
   /**
    * Get object reference(id, tx digest, version id)
@@ -206,13 +193,22 @@ export abstract class Provider {
    */
   abstract getObjectRef(objectId: string): Promise<SuiObjectRef | undefined>;
 
+  /**
+   * Batch get details about a list of objects. If any of the object ids are duplicates the call will fail
+   * @param objectIds
+   * @param options
+   */
+  abstract getObjectBatch(
+    objectIds: ObjectId[],
+    options?: SuiObjectDataOptions,
+  ): Promise<SuiObjectResponse[]>;
+
   // Transactions
   /**
    * Get transaction digests for a given range
-   *
-   * NOTE: this method may get deprecated after DevNet
+   * @deprecated this method will be removed before April 2023, please use `getTransactions` instead
    */
-  abstract getTransactionDigestsInRange(
+  abstract getTransactionDigestsInRangeDeprecated(
     start: GatewayTxSeqNumber,
     end: GatewayTxSeqNumber,
   ): Promise<GetTxnDigestsResponse>;
@@ -229,19 +225,22 @@ export abstract class Provider {
 
   /**
    * Get total number of transactions
-   * NOTE: this method may get deprecated after DevNet
    */
   abstract getTotalTransactionNumber(): Promise<number>;
 
   /**
-   * This is under development endpoint on Fullnode that will eventually
-   * replace the other `executeTransaction` that's only available on the
-   * Gateway
+   * Submit the transaction to fullnode for execution
+   * @param txnBytes BCS serialized transaction data bytes without its type tag, as base-64 encoded string.
+   * @param signature A single signature or list of signatures(used for sponsored transactions)
+   * @param options specify which fields to return (e.g., transaction, effects, events, etc).
+   * By default, only the transaction digest will be returned.
+   * @param requestType WaitForEffectsCert or WaitForLocalExecution, see details in `ExecuteTransactionRequestType`
    */
   abstract executeTransaction(
     txnBytes: Uint8Array | string,
-    signature: SerializedSignature,
-    requestType: ExecuteTransactionRequestType,
+    signature: SerializedSignature | SerializedSignature[],
+    options?: SuiTransactionResponseOptions,
+    requestType?: ExecuteTransactionRequestType,
   ): Promise<SuiTransactionResponse>;
 
   // Move info
@@ -319,7 +318,7 @@ export abstract class Provider {
   abstract unsubscribeEvent(id: SubscriptionId): Promise<boolean>;
 
   /**
-   * Runs the transaction in dev-inpsect mode. Which allows for nearly any
+   * Runs the transaction in dev-inspect mode. Which allows for nearly any
    * transaction (or Move call) with any arguments. Detailed results are
    * provided, including both the transaction effects and any return values.
    *
@@ -332,7 +331,7 @@ export abstract class Provider {
    */
   abstract devInspectTransaction(
     sender: SuiAddress,
-    txn: UnserializedSignableTransaction | string | Uint8Array,
+    txn: Transaction | string | Uint8Array,
     gasPrice: number | null,
     epoch: number | null,
   ): Promise<DevInspectResults>;
@@ -366,7 +365,7 @@ export abstract class Provider {
   abstract getDynamicFieldObject(
     parent_object_id: ObjectId,
     name: string | DynamicFieldName,
-  ): Promise<GetObjectDataResponse>;
+  ): Promise<SuiObjectResponse>;
 
   /**
    * Getting the reference gas price for the network
@@ -379,54 +378,14 @@ export abstract class Provider {
   abstract getDelegatedStakes(address: SuiAddress): Promise<DelegatedStake[]>;
 
   /**
-   * Return all validators available for stake delegation.
+   * Return the latest system state content.
    */
-  abstract getValidators(): Promise<ValidatorMetaData[]>;
-
-  /**
-   * Return the content of `0x5` object
-   */
-  abstract getSuiSystemState(): Promise<SuiSystemState>;
+  abstract getLatestSuiSystemState(): Promise<SuiSystemStateSummary>;
 
   /**
    * Get the sequence number of the latest checkpoint that has been executed
    */
   abstract getLatestCheckpointSequenceNumber(): Promise<number>;
-
-  /**
-   * Returns checkpoint summary based on a checkpoint sequence number
-   * @param sequence_number - The sequence number of the desired checkpoint summary
-   * @deprecated - Prefer `getCheckpoint` instead
-   */
-  abstract getCheckpointSummary(
-    sequenceNumber: number,
-  ): Promise<CheckpointSummary>;
-
-  /**
-   * Returns checkpoint summary based on a checkpoint digest
-   * @param digest - The checkpoint digest
-   * @deprecated - Prefer `getCheckpoint` instead
-   */
-  abstract getCheckpointSummaryByDigest(
-    digest: CheckpointDigest,
-  ): Promise<CheckpointSummary>;
-
-  /**
-   * Return contents of a checkpoint, namely a list of execution digests
-   * @param sequence_number - The sequence number of the desired checkpoint contents
-   * @deprecated - Prefer `getCheckpoint` instead
-   */
-  abstract getCheckpointContents(
-    sequenceNumber: number,
-  ): Promise<CheckpointContents>;
-
-  /**
-   * Returns checkpoint summary based on a checkpoint content digest
-   * @param digest - The checkpoint summary digest
-   */
-  abstract getCheckpointContentsByDigest(
-    digest: CheckPointContentsDigest,
-  ): Promise<CheckpointContents>;
 
   /**
    * Returns information about a given checkpoint

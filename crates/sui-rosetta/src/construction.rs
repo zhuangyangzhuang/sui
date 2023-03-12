@@ -3,11 +3,13 @@
 
 use axum::{Extension, Json};
 use fastcrypto::encoding::{Encoding, Hex};
+use sui_json_rpc_types::{SuiTransactionEffectsAPI, SuiTransactionResponseOptions};
 use sui_types::base_types::SuiAddress;
 use sui_types::crypto::{SignatureScheme, ToFromBytes};
-use sui_types::messages::{ExecuteTransactionRequestType, Transaction, TransactionData};
+use sui_types::messages::{
+    ExecuteTransactionRequestType, Transaction, TransactionData, TransactionDataAPI,
+};
 use sui_types::signature::GenericSignature;
-use sui_types::sui_system_state::{SuiSystemState, SuiSystemStateTrait};
 
 use crate::errors::Error;
 use crate::types::{
@@ -22,8 +24,8 @@ use crate::types::{
 use crate::{OnlineServerContext, SuiEnv};
 use axum::extract::State;
 use axum_extra::extract::WithRejection;
+use shared_crypto::intent::{Intent, IntentMessage};
 use sui_sdk::rpc_types::SuiExecutionStatus;
-use sui_types::intent::{Intent, IntentMessage};
 
 /// This module implements the [Rosetta Construction API](https://www.rosetta-api.org/docs/ConstructionApi.html)
 
@@ -126,17 +128,22 @@ pub async fn submit(
         .quorum_driver()
         .execute_transaction(
             signed_tx,
+            SuiTransactionResponseOptions::full_content(),
             Some(ExecuteTransactionRequestType::WaitForEffectsCert),
         )
         .await?;
 
-    if let SuiExecutionStatus::Failure { error } = response.effects.status {
-        return Err(Error::TransactionExecutionError(error));
+    if let SuiExecutionStatus::Failure { error } = response
+        .effects
+        .expect("Execute transaction should return effects")
+        .status()
+    {
+        return Err(Error::TransactionExecutionError(error.to_string()));
     }
 
     Ok(TransactionIdentifierResponse {
         transaction_identifier: TransactionIdentifier {
-            hash: response.effects.transaction_digest,
+            hash: response.digest,
         },
         metadata: None,
     })
@@ -191,13 +198,11 @@ pub async fn metadata(
     env.check_network_identifier(&request.network_identifier)?;
     let option = request.options.ok_or(Error::MissingMetadata)?;
     let sender = option.internal_operation.sender();
-    let system_state: SuiSystemState = context
+    let gas_price = context
         .client
         .governance_api()
-        .get_sui_system_state()
-        .await?
-        .into();
-    let gas_price = system_state.reference_gas_price();
+        .get_reference_gas_price()
+        .await?;
 
     let (tx_metadata, gas, budget) = match &option.internal_operation {
         InternalOperation::PaySui {
@@ -218,20 +223,17 @@ pub async fn metadata(
                 .into_iter()
                 .map(|coin| coin.object_ref())
                 .collect::<Vec<_>>();
-            // gas is always the first coin for pay_sui
-            let gas = sender_coins[0];
-            (TransactionMetadata::PaySui(sender_coins), gas, 1000)
+            (TransactionMetadata::PaySui, sender_coins, 1000)
         }
         InternalOperation::Delegation {
             sender,
             validator,
             amount,
-            locked_until_epoch,
         } => {
             let coins = context
                 .client
                 .coin_read_api()
-                .select_coins(*sender, None, *amount, *locked_until_epoch, vec![])
+                .select_coins(*sender, None, *amount, None, vec![])
                 .await?
                 .into_iter()
                 .map(|coin| coin.object_ref())
@@ -240,7 +242,7 @@ pub async fn metadata(
             let data = context
                 .client
                 .transaction_builder()
-                .request_add_delegation(
+                .request_add_stake(
                     *sender,
                     coins.iter().map(|coin| coin.0).collect(),
                     Some(*amount as u64),
@@ -251,11 +253,8 @@ pub async fn metadata(
                 .await?;
 
             (
-                TransactionMetadata::Delegation {
-                    coins,
-                    locked_until_epoch: *locked_until_epoch,
-                },
-                data.gas()[0],
+                TransactionMetadata::Delegation { coins },
+                data.gas().to_vec(),
                 13000,
             )
         }
@@ -267,13 +266,14 @@ pub async fn metadata(
         .try_into_data(ConstructionMetadata {
             tx_metadata: tx_metadata.clone(),
             sender,
-            gas,
+            gas: gas.clone(),
             gas_price: 1,
             budget,
         })?;
     let dry_run = context.client.read_api().dry_run_transaction(data).await?;
 
-    let budget = dry_run.effects.gas_used.computation_cost + dry_run.effects.gas_used.storage_cost;
+    let budget =
+        dry_run.effects.gas_used().computation_cost + dry_run.effects.gas_used().storage_cost;
 
     Ok(ConstructionMetadataResponse {
         metadata: ConstructionMetadata {

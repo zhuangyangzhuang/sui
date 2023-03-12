@@ -3,46 +3,51 @@
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use futures::future::join_all;
+use itertools::Itertools;
 use jsonrpsee::core::RpcResult;
+use jsonrpsee::RpcModule;
+use linked_hash_map::LinkedHashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use tap::TapFallible;
+use tracing::debug;
+
+use fastcrypto::encoding::Base64;
 use move_binary_format::normalized::{Module as NormalizedModule, Type};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::StructTag;
-use move_core_types::value::{MoveStruct, MoveValue};
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use sui_types::collection_types::VecMap;
-use sui_types::display::{DisplayCreatedEvent, DisplayObject};
-use sui_types::error::UserInputError;
-use sui_types::intent::{AppId, Intent, IntentMessage, IntentScope, IntentVersion};
-use tap::TapFallible;
-
-use crate::api::ReadApiServer;
-use fastcrypto::encoding::Base64;
-use jsonrpsee::RpcModule;
+use move_core_types::value::{MoveStruct, MoveStructLayout, MoveValue};
+use shared_crypto::intent::{AppId, Intent, IntentMessage, IntentScope, IntentVersion};
 use sui_core::authority::AuthorityState;
 use sui_json_rpc_types::{
-    Checkpoint, CheckpointId, DynamicFieldPage, GetObjectDataResponse, GetPastObjectDataResponse,
-    GetRawObjectDataResponse, MoveFunctionArgType, ObjectValueKind, Page, SuiEvent,
-    SuiMoveNormalizedFunction, SuiMoveNormalizedModule, SuiMoveNormalizedStruct, SuiMoveStruct,
-    SuiMoveValue, SuiObjectInfo, SuiTransactionEvents, SuiTransactionResponse, TransactionsPage,
+    Checkpoint, CheckpointId, DynamicFieldPage, MoveFunctionArgType, ObjectValueKind, Page,
+    SuiEvent, SuiGetPastObjectRequest, SuiMoveNormalizedFunction, SuiMoveNormalizedModule,
+    SuiMoveNormalizedStruct, SuiMoveStruct, SuiMoveValue, SuiObjectDataOptions, SuiObjectInfo,
+    SuiObjectResponse, SuiPastObjectResponse, SuiTransactionEvents, SuiTransactionResponse,
+    SuiTransactionResponseOptions, TransactionsPage,
 };
 use sui_open_rpc::Module;
-use sui_types::base_types::SequenceNumber;
-use sui_types::base_types::{ObjectID, SuiAddress, TransactionDigest, TxSequenceNumber};
-use sui_types::crypto::sha3_hash;
-use sui_types::messages::TransactionData;
-use sui_types::messages_checkpoint::{
-    CheckpointContents, CheckpointContentsDigest, CheckpointDigest, CheckpointSequenceNumber,
-    CheckpointSummary,
+use sui_types::base_types::{
+    ObjectID, SequenceNumber, SuiAddress, TransactionDigest, TxSequenceNumber,
 };
+use sui_types::collection_types::VecMap;
+use sui_types::crypto::sha3_hash;
+use sui_types::digests::TransactionEventsDigest;
+use sui_types::display::{DisplayCreatedEvent, DisplayObject};
+use sui_types::dynamic_field::DynamicFieldName;
+use sui_types::error::UserInputError;
+use sui_types::messages::{
+    TransactionData, TransactionEffects, TransactionEffectsAPI, TransactionEvents,
+    VerifiedTransaction,
+};
+use sui_types::messages_checkpoint::{CheckpointSequenceNumber, CheckpointTimestamp};
 use sui_types::move_package::normalize_modules;
-use sui_types::object::{Data, ObjectRead};
+use sui_types::object::{Data, Object, ObjectRead, PastObjectRead};
 use sui_types::query::{EventQuery, TransactionQuery};
 
-use sui_types::dynamic_field::DynamicFieldName;
-use tracing::debug;
-
 use crate::api::cap_page_limit;
+use crate::api::ReadApiServer;
 use crate::error::Error;
 use crate::SuiRpcModule;
 
@@ -54,6 +59,29 @@ const MAX_DISPLAY_NESTED_LEVEL: usize = 10;
 // Fullnodes.
 pub struct ReadApi {
     pub state: Arc<AuthorityState>,
+}
+
+// Internal data structure to make it easy to work with data returned from
+// authority store and also enable code sharing between get_transaction_with_options,
+// multi_get_transaction_with_options, etc.
+#[derive(Default)]
+struct IntermediateTransactionResponse {
+    digest: TransactionDigest,
+    transaction: Option<VerifiedTransaction>,
+    effects: Option<TransactionEffects>,
+    events: Option<SuiTransactionEvents>,
+    checkpoint_seq: Option<CheckpointSequenceNumber>,
+    timestamp: Option<CheckpointTimestamp>,
+    errors: Vec<String>,
+}
+
+impl IntermediateTransactionResponse {
+    pub fn new(digest: TransactionDigest) -> Self {
+        Self {
+            digest,
+            ..Default::default()
+        }
+    }
 }
 
 impl ReadApi {
@@ -95,6 +123,7 @@ impl ReadApiServer for ReadApi {
     async fn get_dynamic_fields(
         &self,
         parent_object_id: ObjectID,
+        // exclusive cursor if `Some`, otherwise start from the beginning
         cursor: Option<ObjectID>,
         limit: Option<usize>,
     ) -> RpcResult<DynamicFieldPage> {
@@ -103,144 +132,68 @@ impl ReadApiServer for ReadApi {
             .state
             .get_dynamic_fields(parent_object_id, cursor, limit + 1)
             .map_err(|e| anyhow!("{e}"))?;
-        let next_cursor = data.get(limit).map(|info| info.object_id);
+        let has_next_page = data.len() > limit;
         data.truncate(limit);
-        Ok(DynamicFieldPage { data, next_cursor })
-    }
-
-    async fn get_object(&self, object_id: ObjectID) -> RpcResult<GetObjectDataResponse> {
-        Ok(self
-            .state
-            .get_object_read(&object_id)
-            .await
-            .map_err(|e| {
-                debug!(?object_id, "Failed to get object: {:?}", e);
-                anyhow!("{e}")
-            })?
-            .try_into()?)
-    }
-
-    async fn get_dynamic_field_object(
-        &self,
-        parent_object_id: ObjectID,
-        name: DynamicFieldName,
-    ) -> RpcResult<GetObjectDataResponse> {
-        let id = self
-            .state
-            .get_dynamic_field_object_id(parent_object_id, &name)
-            .map_err(|e| anyhow!("{e}"))?
-            .ok_or_else(|| {
-                anyhow!("Cannot find dynamic field [{name:?}] for object [{parent_object_id}].")
-            })?;
-        self.get_object(id).await
-    }
-
-    async fn get_total_transaction_number(&self) -> RpcResult<u64> {
-        Ok(self.state.get_total_transaction_number()?)
-    }
-
-    async fn get_transactions_in_range(
-        &self,
-        start: TxSequenceNumber,
-        end: TxSequenceNumber,
-    ) -> RpcResult<Vec<TransactionDigest>> {
-        Ok(self
-            .state
-            .get_transactions_in_range(start, end)?
-            .into_iter()
-            .map(|(_, digest)| digest)
-            .collect())
-    }
-
-    async fn get_transaction(
-        &self,
-        digest: TransactionDigest,
-    ) -> RpcResult<SuiTransactionResponse> {
-        let (transaction, effects) = self
-            .state
-            .get_executed_transaction_and_effects(digest)
-            .await
-            .tap_err(|err| debug!(tx_digest=?digest, "Failed to get transaction: {:?}", err))?;
-        let checkpoint = self
-            .state
-            .get_transaction_checkpoint(&digest)
-            .map_err(|e| anyhow!("{e}"))?;
-        let checkpoint_timestamp = checkpoint.as_ref().map(|c| c.summary.timestamp_ms);
-
-        let events = if let Some(digest) = effects.events_digest {
-            let events = self
-                .state
-                .get_transaction_events(digest)
-                .await
-                .map_err(Error::from)?;
-            SuiTransactionEvents::try_from(
-                events,
-                // threading the epoch_store through this API does not
-                // seem possible, so we just read it from the state and fetch
-                // the module cache out of it.
-                // Notice that no matter what module cache we get things
-                // should work
-                self.state
-                    .load_epoch_store_one_call_per_task()
-                    .module_cache()
-                    .as_ref(),
-            )?
-        } else {
-            SuiTransactionEvents::default()
-        };
-
-        Ok(SuiTransactionResponse {
-            transaction: transaction.into_message().try_into()?,
-            effects: effects.into(),
-            events,
-            timestamp_ms: checkpoint_timestamp,
-            confirmed_local_execution: None,
-            checkpoint: checkpoint.map(|c| c.summary.sequence_number),
+        let next_cursor = data.last().cloned().map_or(cursor, |c| Some(c.object_id));
+        Ok(DynamicFieldPage {
+            data,
+            next_cursor,
+            has_next_page,
         })
     }
 
-    async fn multi_get_transactions(
+    async fn get_object_with_options(
         &self,
-        digests: Vec<TransactionDigest>,
-    ) -> RpcResult<Vec<SuiTransactionResponse>> {
-        if digests.len() <= QUERY_MAX_RESULT_LIMIT {
-            let mut tx_digests: Vec<TransactionDigest> = digests
-                .iter()
-                .take(QUERY_MAX_RESULT_LIMIT)
-                .copied()
-                .collect();
-            tx_digests.dedup();
+        object_id: ObjectID,
+        options: Option<SuiObjectDataOptions>,
+    ) -> RpcResult<SuiObjectResponse> {
+        let object_read = self.state.get_object_read(&object_id).await.map_err(|e| {
+            debug!(?object_id, "Failed to get object: {:?}", e);
+            anyhow!("{e}")
+        })?;
+        let options = options.unwrap_or_default();
 
-            let txn_batch = self
-                .state
-                .multi_get_transactions(&tx_digests)
-                .await
-                .tap_err(|err| debug!(txs_digests=?tx_digests, "Failed to get batch: {:?}", err))?;
-
-            let mut responses: Vec<SuiTransactionResponse> = Vec::new();
-            for (txn, digest) in txn_batch.into_iter().zip(tx_digests.iter()) {
-                let (transaction, effects, events, checkpoint) = txn;
-                responses.push(SuiTransactionResponse {
-                    transaction: transaction.into_message().try_into()?,
-                    effects: effects.into(),
-                    events: SuiTransactionEvents::try_from(
-                        events,
-                        // threading the epoch_store through this API does not
-                        // seem possible, so we just read it from the state and fetch
-                        // the module cache out of it.
-                        // Notice that no matter what module cache we get things
-                        // should work
-                        self.state
-                            .load_epoch_store_one_call_per_task()
-                            .module_cache()
-                            .as_ref(),
-                    )?,
-                    timestamp_ms: self.state.get_timestamp_ms(digest).await?,
-                    confirmed_local_execution: None,
-                    checkpoint: checkpoint.map(|(_epoch, checkpoint)| checkpoint),
-                })
+        match object_read {
+            ObjectRead::NotExists(id) => Ok(SuiObjectResponse::NotExists(id)),
+            ObjectRead::Exists(object_ref, o, layout) => {
+                let display_fields = if options.show_display {
+                    get_display_fields(self, &o, &layout).await?
+                } else {
+                    None
+                };
+                Ok(SuiObjectResponse::Exists(
+                    (object_ref, o, layout, options, display_fields).try_into()?,
+                ))
             }
-            Ok(responses)
+            ObjectRead::Deleted(oref) => Ok(SuiObjectResponse::Deleted(oref.into())),
+        }
+    }
+
+    async fn multi_get_object_with_options(
+        &self,
+        object_ids: Vec<ObjectID>,
+        options: Option<SuiObjectDataOptions>,
+    ) -> RpcResult<Vec<SuiObjectResponse>> {
+        if object_ids.len() <= QUERY_MAX_RESULT_LIMIT {
+            let mut futures = vec![];
+            for object_id in object_ids {
+                futures.push(self.get_object_with_options(object_id, options.clone()))
+            }
+            let results = join_all(futures).await;
+            let (oks, errs): (Vec<_>, Vec<_>) = results.into_iter().partition(Result::is_ok);
+
+            let success = oks.into_iter().filter_map(Result::ok).collect();
+            let errors: Vec<_> = errs.into_iter().filter_map(Result::err).collect();
+            if !errors.is_empty() {
+                let error_string = errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<String>>()
+                    .join("; ");
+                Err(anyhow!("{error_string}").into())
+            } else {
+                Ok(success)
+            }
         } else {
             Err(anyhow!(UserInputError::SizeLimitExceeded {
                 limit: "input limit".to_string(),
@@ -248,6 +201,343 @@ impl ReadApiServer for ReadApi {
             })
             .into())
         }
+    }
+
+    async fn try_get_past_object(
+        &self,
+        object_id: ObjectID,
+        version: SequenceNumber,
+        options: Option<SuiObjectDataOptions>,
+    ) -> RpcResult<SuiPastObjectResponse> {
+        let past_read = self
+            .state
+            .get_past_object_read(&object_id, version)
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        let options = options.unwrap_or_default();
+        match past_read {
+            PastObjectRead::ObjectNotExists(id) => Ok(SuiPastObjectResponse::ObjectNotExists(id)),
+            PastObjectRead::VersionFound(object_ref, o, layout) => {
+                let display_fields = if options.show_display {
+                    get_display_fields(self, &o, &layout).await?
+                } else {
+                    None
+                };
+                Ok(SuiPastObjectResponse::VersionFound(
+                    (object_ref, o, layout, options, display_fields).try_into()?,
+                ))
+            }
+            PastObjectRead::ObjectDeleted(oref) => {
+                Ok(SuiPastObjectResponse::ObjectDeleted(oref.into()))
+            }
+            PastObjectRead::VersionNotFound(id, seq_num) => {
+                Ok(SuiPastObjectResponse::VersionNotFound(id, seq_num))
+            }
+            PastObjectRead::VersionTooHigh {
+                object_id,
+                asked_version,
+                latest_version,
+            } => Ok(SuiPastObjectResponse::VersionTooHigh {
+                object_id,
+                asked_version,
+                latest_version,
+            }),
+        }
+    }
+
+    async fn try_multi_get_past_objects(
+        &self,
+        past_objects: Vec<SuiGetPastObjectRequest>,
+        options: Option<SuiObjectDataOptions>,
+    ) -> RpcResult<Vec<SuiPastObjectResponse>> {
+        if past_objects.len() <= QUERY_MAX_RESULT_LIMIT {
+            let mut futures = vec![];
+            for past_object in past_objects {
+                futures.push(self.try_get_past_object(
+                    past_object.object_id,
+                    past_object.version,
+                    options.clone(),
+                ));
+            }
+            let results = join_all(futures).await;
+            let (oks, errs): (Vec<_>, Vec<_>) = results.into_iter().partition(Result::is_ok);
+            let success = oks.into_iter().filter_map(Result::ok).collect();
+            let errors: Vec<_> = errs.into_iter().filter_map(Result::err).collect();
+            if !errors.is_empty() {
+                let error_string = errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<String>>()
+                    .join("; ");
+                Err(anyhow!("{error_string}").into())
+            } else {
+                Ok(success)
+            }
+        } else {
+            Err(anyhow!(UserInputError::SizeLimitExceeded {
+                limit: "input limit".to_string(),
+                value: QUERY_MAX_RESULT_LIMIT.to_string()
+            })
+            .into())
+        }
+    }
+
+    async fn get_dynamic_field_object(
+        &self,
+        parent_object_id: ObjectID,
+        name: DynamicFieldName,
+    ) -> RpcResult<SuiObjectResponse> {
+        let id = self
+            .state
+            .get_dynamic_field_object_id(parent_object_id, &name)
+            .map_err(|e| anyhow!("{e}"))?
+            .ok_or_else(|| {
+                anyhow!("Cannot find dynamic field [{name:?}] for object [{parent_object_id}].")
+            })?;
+        // TODO(chris): add options to `get_dynamic_field_object` API as well
+        self.get_object_with_options(id, Some(SuiObjectDataOptions::full_content()))
+            .await
+    }
+
+    async fn get_total_transaction_number(&self) -> RpcResult<u64> {
+        Ok(self.state.get_total_transaction_number()?)
+    }
+
+    async fn get_transactions_in_range_deprecated(
+        &self,
+        start: TxSequenceNumber,
+        end: TxSequenceNumber,
+    ) -> RpcResult<Vec<TransactionDigest>> {
+        Ok(self
+            .state
+            .get_transactions_in_range_deprecated(start, end)?
+            .into_iter()
+            .map(|(_, digest)| digest)
+            .collect())
+    }
+
+    async fn get_transaction_with_options(
+        &self,
+        digest: TransactionDigest,
+        opts: Option<SuiTransactionResponseOptions>,
+    ) -> RpcResult<SuiTransactionResponse> {
+        let opts = opts.unwrap_or_default();
+        let mut temp_response = IntermediateTransactionResponse::new(digest);
+
+        if opts.show_input {
+            temp_response.transaction =
+                Some(self.state.get_executed_transaction(digest).await.tap_err(
+                    |err| debug!(tx_digest=?digest, "Failed to get transaction: {:?}", err),
+                )?);
+        }
+
+        // Fetch effects when `show_events` is true because events relies on effects
+        if opts.require_effects() {
+            temp_response.effects =
+                Some(self.state.get_executed_effects(digest).await.tap_err(
+                    |err| debug!(tx_digest=?digest, "Failed to get effects: {:?}", err),
+                )?);
+        }
+
+        if let Some((_, seq)) = self
+            .state
+            .get_transaction_checkpoint_sequence(&digest)
+            .map_err(|e| anyhow!("{e}"))?
+        {
+            temp_response.checkpoint_seq = Some(seq);
+        }
+
+        if temp_response.checkpoint_seq.is_some() {
+            let checkpoint = self
+                .state
+                // safe to unwrap because we have checked `is_some` above
+                .get_checkpoint_by_sequence_number(temp_response.checkpoint_seq.unwrap())
+                .map_err(|e| anyhow!("{e}"))?;
+            // TODO(chris): we don't need to fetch the whole checkpoint summary
+            temp_response.timestamp = checkpoint.as_ref().map(|c| c.timestamp_ms);
+        }
+
+        if opts.show_events && temp_response.effects.is_some() {
+            // safe to unwrap because we have checked is_some
+            if let Some(digest) = temp_response.effects.as_ref().unwrap().events_digest() {
+                let events = self
+                    .state
+                    .get_transaction_events(*digest)
+                    .await
+                    .map_err(Error::from)?;
+                match to_sui_transaction_events(self, events) {
+                    Ok(e) => temp_response.events = Some(e),
+                    Err(e) => temp_response.errors.push(e.to_string()),
+                };
+            } else {
+                // events field will be Some if and only if `show_events` is true and
+                // there is no error in converting fetching events
+                temp_response.events = Some(SuiTransactionEvents::default());
+            }
+        }
+
+        Ok(convert_to_response(temp_response, &opts))
+    }
+
+    async fn multi_get_transactions_with_options(
+        &self,
+        digests: Vec<TransactionDigest>,
+        opts: Option<SuiTransactionResponseOptions>,
+    ) -> RpcResult<Vec<SuiTransactionResponse>> {
+        let num_digests = digests.len();
+        if num_digests > QUERY_MAX_RESULT_LIMIT {
+            return Err(anyhow!(UserInputError::SizeLimitExceeded {
+                limit: "multi get transaction input limit".to_string(),
+                value: QUERY_MAX_RESULT_LIMIT.to_string()
+            })
+            .into());
+        }
+        // use LinkedHashMap to dedup and can iterate in insertion order.
+        let mut temp_response: LinkedHashMap<&TransactionDigest, IntermediateTransactionResponse> =
+            LinkedHashMap::from_iter(
+                digests
+                    .iter()
+                    .map(|k| (k, IntermediateTransactionResponse::new(*k))),
+            );
+        if temp_response.len() < num_digests {
+            return Err(anyhow!("The list of digests in the input contain duplicates").into());
+        }
+
+        let opts = opts.unwrap_or_default();
+
+        if opts.show_input {
+            let transactions = self
+                .state
+                .multi_get_executed_transactions(&digests)
+                .await
+                .tap_err(
+                    |err| debug!(digests=?digests, "Failed to multi get transaction: {:?}", err),
+                )?;
+
+            for ((_digest, cache_entry), txn) in
+                temp_response.iter_mut().zip(transactions.into_iter())
+            {
+                cache_entry.transaction = txn;
+            }
+        }
+
+        // Fetch effects when `show_events` is true because events relies on effects
+        if opts.show_effects || opts.show_events {
+            let effects_list = self
+                .state
+                .multi_get_executed_effects(&digests)
+                .await
+                .tap_err(
+                    |err| debug!(digests=?digests, "Failed to multi get effects: {:?}", err),
+                )?;
+            for ((_digest, cache_entry), e) in
+                temp_response.iter_mut().zip(effects_list.into_iter())
+            {
+                cache_entry.effects = e;
+            }
+        }
+
+        let checkpoint_seq_list = self
+                .state
+                .multi_get_transaction_checkpoint(&digests)
+                .await
+                .tap_err(
+                    |err| debug!(digests=?digests, "Failed to multi get checkpoint sequence number: {:?}", err))?;
+        for ((_digest, cache_entry), seq) in temp_response
+            .iter_mut()
+            .zip(checkpoint_seq_list.into_iter())
+        {
+            cache_entry.checkpoint_seq = seq.map(|(_, seq)| seq);
+        }
+
+        let unique_checkpoint_numbers = temp_response
+            .values()
+            .filter_map(|cache_entry| cache_entry.checkpoint_seq)
+            // It's likely that many transactions have the same checkpoint, so we don't
+            // need to over-fetch
+            .unique()
+            .collect::<Vec<CheckpointSequenceNumber>>();
+
+        // fetch timestamp from the DB
+        let timestamps = self
+            .state
+            .multi_get_checkpoint_by_sequence_number(&unique_checkpoint_numbers)
+            .map_err(|e| anyhow!("{e}"))?
+            .into_iter()
+            .map(|c| c.map(|checkpoint| checkpoint.timestamp_ms));
+
+        // construct a hashmap of checkpoint -> timestamp for fast lookup
+        let checkpoint_to_timestamp = unique_checkpoint_numbers
+            .into_iter()
+            .zip(timestamps)
+            .collect::<HashMap<_, _>>();
+
+        // fill cache with the timestamp
+        for (_, cache_entry) in temp_response.iter_mut() {
+            if cache_entry.checkpoint_seq.is_some() {
+                // safe to unwrap because is_some is checked
+                cache_entry.timestamp = *checkpoint_to_timestamp
+                    .get(cache_entry.checkpoint_seq.as_ref().unwrap())
+                    // Safe to unwrap because checkpoint_seq is guaranteed to exist in checkpoint_to_timestamp
+                    .unwrap();
+            }
+        }
+
+        if opts.show_events {
+            let event_digests_list = temp_response
+                .values()
+                .filter_map(|cache_entry| match &cache_entry.effects {
+                    Some(eff) => eff.events_digest().cloned(),
+                    None => None,
+                })
+                .collect::<Vec<TransactionEventsDigest>>();
+
+            // fetch events from the DB
+            let events = self
+                .state
+                .multi_get_events(&event_digests_list)
+                .map_err(|e| anyhow!("{e}"))?
+                .into_iter();
+
+            // construct a hashmap of event digests -> events for fast lookup
+            let mut event_digest_to_events = event_digests_list
+                .into_iter()
+                .zip(events)
+                .collect::<HashMap<_, _>>();
+
+            // fill cache with the events
+            for (_, cache_entry) in temp_response.iter_mut() {
+                let event_digest: Option<Option<TransactionEventsDigest>> = cache_entry
+                    .effects
+                    .as_ref()
+                    .map(|e| e.events_digest().cloned());
+                let event_digest = event_digest.flatten();
+                if event_digest.is_some() {
+                    // safe to unwrap because `is_some` is checked
+                    let events: Option<RpcResult<SuiTransactionEvents>> = event_digest_to_events
+                        .remove(event_digest.as_ref().unwrap())
+                        .expect("This can only happen if there are two or more transaction digests sharing the same event digests, which should never happen")
+                        .map(|e| to_sui_transaction_events(self, e));
+                    match events {
+                        Some(Ok(e)) => cache_entry.events = Some(e),
+                        Some(Err(e)) => cache_entry.errors.push(e.to_string()),
+                        None => cache_entry.errors.push(format!(
+                            "Failed to fetch events with event digest {:?}",
+                            event_digest.unwrap()
+                        )),
+                    }
+                } else {
+                    // events field will be Some if and only if `show_events` is true and
+                    // there is no error in converting fetching events
+                    cache_entry.events = Some(SuiTransactionEvents::default());
+                }
+            }
+        }
+
+        Ok(temp_response
+            .into_iter()
+            .map(|c| convert_to_response(c.1, &opts))
+            .collect::<Vec<_>>())
     }
 
     async fn get_normalized_move_modules_by_package(
@@ -360,6 +650,7 @@ impl ReadApiServer for ReadApi {
     async fn get_transactions(
         &self,
         query: TransactionQuery,
+        // exclusive cursor if `Some`, otherwise start from the beginning
         cursor: Option<TransactionDigest>,
         limit: Option<usize>,
         descending_order: Option<bool>,
@@ -373,22 +664,14 @@ impl ReadApiServer for ReadApi {
             .get_transactions(query, cursor, Some(limit + 1), descending)?;
 
         // extract next cursor
-        let next_cursor = data.get(limit).cloned();
+        let has_next_page = data.len() > limit;
         data.truncate(limit);
-        Ok(Page { data, next_cursor })
-    }
-
-    async fn try_get_past_object(
-        &self,
-        object_id: ObjectID,
-        version: SequenceNumber,
-    ) -> RpcResult<GetPastObjectDataResponse> {
-        Ok(self
-            .state
-            .get_past_object_read(&object_id, version)
-            .await
-            .map_err(|e| anyhow!("{e}"))?
-            .try_into()?)
+        let next_cursor = data.last().cloned().map_or(cursor, Some);
+        Ok(Page {
+            data,
+            next_cursor,
+            has_next_page,
+        })
     }
 
     async fn get_latest_checkpoint_sequence_number(&self) -> RpcResult<CheckpointSequenceNumber> {
@@ -403,67 +686,6 @@ impl ReadApiServer for ReadApi {
     async fn get_checkpoint(&self, id: CheckpointId) -> RpcResult<Checkpoint> {
         Ok(self.get_checkpoint_internal(id)?)
     }
-
-    async fn get_checkpoint_summary_by_digest(
-        &self,
-        digest: CheckpointDigest,
-    ) -> RpcResult<CheckpointSummary> {
-        Ok(self
-            .state
-            .get_checkpoint_summary_by_digest(digest)
-            .map_err(|e| {
-                anyhow!(
-                    "Checkpoint summary based on digest: {digest:?} were not found with error: {e}"
-                )
-            })?)
-    }
-
-    async fn get_checkpoint_summary(
-        &self,
-        sequence_number: CheckpointSequenceNumber,
-    ) -> RpcResult<CheckpointSummary> {
-        Ok(self.state.get_checkpoint_summary_by_sequence_number(sequence_number)
-            .map_err(|e| anyhow!("Checkpoint summary based on sequence number: {sequence_number} was not found with error :{e}"))?)
-    }
-
-    async fn get_checkpoint_contents_by_digest(
-        &self,
-        digest: CheckpointContentsDigest,
-    ) -> RpcResult<CheckpointContents> {
-        Ok(self.state.get_checkpoint_contents(digest).map_err(|e| {
-            anyhow!(
-                "Checkpoint contents based on digest: {digest:?} were not found with error: {e}"
-            )
-        })?)
-    }
-
-    async fn get_checkpoint_contents(
-        &self,
-        sequence_number: CheckpointSequenceNumber,
-    ) -> RpcResult<CheckpointContents> {
-        Ok(self
-            .state
-            .get_checkpoint_contents_by_sequence_number(sequence_number)
-            .map_err(|e| anyhow!("Checkpoint contents based on seq number: {sequence_number} were not found with error: {e}"))?)
-    }
-
-    async fn get_raw_object(&self, object_id: ObjectID) -> RpcResult<GetRawObjectDataResponse> {
-        Ok(self
-            .state
-            .get_object_read(&object_id)
-            .await
-            .map_err(|e| anyhow!("{e}"))?
-            .try_into()?)
-    }
-
-    async fn get_display_deprecated(
-        &self,
-        object_id: ObjectID,
-    ) -> RpcResult<BTreeMap<String, String>> {
-        let (object_type, move_struct) = get_object_type_and_struct(self, object_id).await?;
-        let display_object = get_display_object(self, object_type).await?;
-        Ok(get_rendered_fields(display_object.fields, &move_struct).map_err(|e| anyhow!("{e}"))?)
-    }
 }
 
 impl SuiRpcModule for ReadApi {
@@ -476,11 +698,47 @@ impl SuiRpcModule for ReadApi {
     }
 }
 
-async fn get_display_object(
+fn to_sui_transaction_events(
     fullnode_api: &ReadApi,
-    object_type: StructTag,
-) -> RpcResult<DisplayObject> {
+    events: TransactionEvents,
+) -> RpcResult<SuiTransactionEvents> {
+    Ok(SuiTransactionEvents::try_from(
+        events,
+        // threading the epoch_store through this API does not
+        // seem possible, so we just read it from the state and fetch
+        // the module cache out of it.
+        // Notice that no matter what module cache we get things
+        // should work
+        fullnode_api
+            .state
+            .load_epoch_store_one_call_per_task()
+            .module_cache()
+            .as_ref(),
+    )?)
+}
+
+async fn get_display_fields(
+    fullnode_api: &ReadApi,
+    original_object: &Object,
+    original_layout: &Option<MoveStructLayout>,
+) -> RpcResult<Option<BTreeMap<String, String>>> {
+    let (object_type, layout) = get_object_type_and_struct(original_object, original_layout)?;
+    if let Some(display_object) = get_display_object_by_type(fullnode_api, &object_type).await? {
+        return Ok(Some(get_rendered_fields(display_object.fields, &layout)?));
+    }
+    Ok(None)
+}
+
+async fn get_display_object_by_type(
+    fullnode_api: &ReadApi,
+    object_type: &StructTag,
+) -> RpcResult<Option<DisplayObject>> {
     let display_object_id = get_display_object_id(fullnode_api, object_type).await?;
+    if display_object_id.is_none() {
+        return Ok(None);
+    }
+    // safe to unwrap because `is_none` is checked above
+    let display_object_id = display_object_id.unwrap();
     if let ObjectRead::Exists(_, display_object, _) = fullnode_api
         .state
         .get_object_read(&display_object_id)
@@ -491,8 +749,11 @@ async fn get_display_object(
             .data
             .try_as_move()
             .ok_or_else(|| anyhow!("Failed to extract Move object from {display_object_id}"))?;
-        Ok(bcs::from_bytes::<DisplayObject>(move_object.contents())
-            .map_err(|e| anyhow!("Failed to deserialize DisplayObject {display_object_id}: {e}"))?)
+        Ok(Some(
+            bcs::from_bytes::<DisplayObject>(move_object.contents()).map_err(|e| {
+                anyhow!("Failed to deserialize DisplayObject {display_object_id}: {e}")
+            })?,
+        ))
     } else {
         Err(anyhow!("Display object {display_object_id} does not exist"))?
     }
@@ -500,58 +761,53 @@ async fn get_display_object(
 
 async fn get_display_object_id(
     fullnode_api: &ReadApi,
-    object_type: StructTag,
-) -> RpcResult<ObjectID> {
+    object_type: &StructTag,
+) -> RpcResult<Option<ObjectID>> {
     let display_created_event = fullnode_api
         .state
         .query_events(
-            EventQuery::MoveEvent(DisplayCreatedEvent::type_(&object_type).to_string()),
+            EventQuery::MoveEvent(DisplayCreatedEvent::type_(object_type).to_string()),
             /* cursor */ None,
             /* limit */ 1,
             /* descending */ false,
         )
         .await?;
     if display_created_event.is_empty() {
-        return Err(anyhow!(
-            "Failed to find DisplayCreated event for {object_type}"
-        ))?;
+        return Ok(None);
     }
     if let SuiEvent::MoveEvent { bcs, .. } = display_created_event[0].clone().1.event {
         let display_object_id = bcs::from_bytes::<DisplayCreatedEvent>(&bcs)
             .map_err(|e| anyhow!("Failed to deserialize DisplayCreatedEvent: {e}"))?
             .id
             .bytes;
-        Ok(display_object_id)
+        Ok(Some(display_object_id))
     } else {
         Err(anyhow!("Failed to extract display object id from event"))?
     }
 }
 
-async fn get_object_type_and_struct(
-    fullnode_api: &ReadApi,
-    object_id: ObjectID,
+fn get_object_type_and_struct(
+    o: &Object,
+    layout: &Option<MoveStructLayout>,
 ) -> RpcResult<(StructTag, MoveStruct)> {
-    let object_read = fullnode_api
-        .state
-        .get_object_read(&object_id)
-        .await
-        .map_err(|e| anyhow!("Failed to fetch {object_id}: {e}"))?;
-    if let ObjectRead::Exists(_, o, layout) = object_read {
-        let layout = layout.ok_or_else(|| anyhow!("Failed to extract layout"))?;
-        let object_type = o
-            .type_()
-            .ok_or_else(|| anyhow!("Failed to extract object type"))?
-            .clone();
-        let move_struct = o
-            .data
-            .try_as_move()
-            .ok_or_else(|| anyhow!("Failed to extract Move object from {object_id}"))?
-            .to_move_struct(&layout)
-            .map_err(|err| anyhow!("{err}"))?;
-        Ok((object_type, move_struct))
-    } else {
-        Err(anyhow!("Object {object_id} does not exist"))?
-    }
+    let object_type = o
+        .type_()
+        .ok_or_else(|| anyhow!("Failed to extract object type"))?
+        .clone()
+        .into();
+    let move_struct = get_move_struct(o, layout)?;
+    Ok((object_type, move_struct))
+}
+
+fn get_move_struct(o: &Object, layout: &Option<MoveStructLayout>) -> RpcResult<MoveStruct> {
+    let layout = layout
+        .as_ref()
+        .ok_or_else(|| anyhow!("Failed to extract layout"))?;
+    Ok(o.data
+        .try_as_move()
+        .ok_or_else(|| anyhow!("Failed to extract Move object"))?
+        .to_move_struct(layout)
+        .map_err(|err| anyhow!("{err}"))?)
 }
 
 pub async fn get_move_module(
@@ -706,4 +962,43 @@ fn get_value_from_move_struct(move_struct: &SuiMoveStruct, var_name: &str) -> Rp
 
         _ => Ok(current_value.to_string()),
     }
+}
+
+fn convert_to_response(
+    cache: IntermediateTransactionResponse,
+    opts: &SuiTransactionResponseOptions,
+) -> SuiTransactionResponse {
+    let mut response = SuiTransactionResponse::new(cache.digest);
+    response.errors = cache.errors;
+
+    if opts.show_input && cache.transaction.is_some() {
+        match cache.transaction.unwrap().into_message().try_into() {
+            Ok(t) => {
+                response.transaction = Some(t);
+            }
+            Err(e) => {
+                response.errors.push(e.to_string());
+            }
+        }
+    }
+
+    if opts.show_effects && cache.effects.is_some() {
+        match cache.effects.unwrap().try_into() {
+            Ok(effects) => {
+                response.effects = Some(effects);
+            }
+            Err(e) => {
+                response.errors.push(e.to_string());
+            }
+        }
+    }
+
+    response.checkpoint = cache.checkpoint_seq;
+    response.timestamp_ms = cache.timestamp;
+
+    if opts.show_events {
+        response.events = cache.events;
+    }
+
+    response
 }

@@ -13,7 +13,6 @@
 <b>use</b> <a href="balance.md#0x2_balance">0x2::balance</a>;
 <b>use</b> <a href="clock.md#0x2_clock">0x2::clock</a>;
 <b>use</b> <a href="coin.md#0x2_coin">0x2::coin</a>;
-<b>use</b> <a href="epoch_time_lock.md#0x2_epoch_time_lock">0x2::epoch_time_lock</a>;
 <b>use</b> <a href="sui.md#0x2_sui">0x2::sui</a>;
 <b>use</b> <a href="sui_system.md#0x2_sui_system">0x2::sui_system</a>;
 <b>use</b> <a href="tx_context.md#0x2_tx_context">0x2::tx_context</a>;
@@ -25,27 +24,6 @@
 <a name="@Constants_0"></a>
 
 ## Constants
-
-
-<a name="0x2_genesis_INIT_MAX_VALIDATOR_COUNT"></a>
-
-Initial value of the upper-bound on the number of validators.
-
-
-<pre><code><b>const</b> <a href="genesis.md#0x2_genesis_INIT_MAX_VALIDATOR_COUNT">INIT_MAX_VALIDATOR_COUNT</a>: u64 = 100;
-</code></pre>
-
-
-
-<a name="0x2_genesis_INIT_MIN_VALIDATOR_STAKE"></a>
-
-Initial value of the lower-bound on the amount of stake required to become a validator.
-TODO: testnet only. Needs to be changed.
-
-
-<pre><code><b>const</b> <a href="genesis.md#0x2_genesis_INIT_MIN_VALIDATOR_STAKE">INIT_MIN_VALIDATOR_STAKE</a>: u64 = 1;
-</code></pre>
-
 
 
 <a name="0x2_genesis_INIT_STAKE_SUBSIDY_AMOUNT"></a>
@@ -161,11 +139,10 @@ all the information we need in the system.
             primary_address,
             worker_address,
             // Initialize all validators <b>with</b> uniform stake taken from the subsidy fund.
-            <a href="balance.md#0x2_balance_split">balance::split</a>(&<b>mut</b> subsidy_fund, initial_validator_stake_mist),
-            <a href="_none">option::none</a>(),
+            <a href="_some">option::some</a>(<a href="balance.md#0x2_balance_split">balance::split</a>(&<b>mut</b> subsidy_fund, initial_validator_stake_mist)),
             gas_price,
             commission_rate,
-            0, // start operating right away at epoch 0
+            <b>true</b>, // <a href="validator.md#0x2_validator">validator</a> is active right away
             ctx
         ));
         i = i + 1;
@@ -175,8 +152,6 @@ all the information we need in the system.
         validators,
         subsidy_fund,
         storage_fund,
-        <a href="genesis.md#0x2_genesis_INIT_MAX_VALIDATOR_COUNT">INIT_MAX_VALIDATOR_COUNT</a>,
-        <a href="genesis.md#0x2_genesis_INIT_MIN_VALIDATOR_STAKE">INIT_MIN_VALIDATOR_STAKE</a>,
         governance_start_epoch,
         <a href="genesis.md#0x2_genesis_INIT_STAKE_SUBSIDY_AMOUNT">INIT_STAKE_SUBSIDY_AMOUNT</a>,
         protocol_version,

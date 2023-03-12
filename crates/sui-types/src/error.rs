@@ -189,8 +189,11 @@ pub enum UserInputError {
 pub enum SuiError {
     #[error("Error checking transaction input objects: {:?}", error)]
     UserInputError { error: UserInputError },
-    #[error("Expecting a singler owner, shared ownership found")]
+    #[error("Expecting a single owner, shared ownership found")]
     UnexpectedOwnerType,
+
+    #[error("There are already {queue_len} transactions pending, above threshold of {threshold}")]
+    TooManyTransactionsPendingExecution { queue_len: usize, threshold: usize },
 
     #[error("Input {object_id} already has {queue_len} transactions pending, above threshold of {threshold}")]
     TooManyTransactionsPendingOnObject {
@@ -426,8 +429,14 @@ pub enum SuiError {
     #[error("Found the sui system state object but it has an unexpected version")]
     SuiSystemStateUnexpectedVersion,
 
+    #[error("Message version is not supported at the current protocol version: {error}")]
+    WrongMessageVersion { error: String },
+
     #[error("unknown error: {0}")]
     Unknown(String),
+
+    #[error("Failed to perform file operation: {0}")]
+    FileIOError(String),
 }
 
 #[repr(u64)]
@@ -440,10 +449,18 @@ pub enum VMMemoryLimitExceededSubStatusCode {
     NEW_ID_COUNT_LIMIT_EXCEEDED = 2,
     DELETED_ID_COUNT_LIMIT_EXCEEDED = 3,
     TRANSFER_ID_COUNT_LIMIT_EXCEEDED = 4,
+    OBJECT_RUNTIME_CACHE_LIMIT_EXCEEDED = 5,
+    OBJECT_RUNTIME_STORE_LIMIT_EXCEEDED = 6,
 }
 
 pub type SuiResult<T = ()> = Result<T, SuiError>;
 pub type UserInputResult<T = ()> = Result<T, UserInputError>;
+
+impl From<sui_protocol_config::Error> for SuiError {
+    fn from(error: sui_protocol_config::Error) -> Self {
+        SuiError::WrongMessageVersion { error: error.0 }
+    }
+}
 
 // TODO these are both horribly wrong, categorization needs to be considered
 impl From<PartialVMError> for SuiError {
@@ -568,7 +585,24 @@ impl SuiError {
             SuiError::QuorumFailedToGetEffectsQuorumWhenProcessingTransaction { .. } => {
                 (false, true)
             }
+
+            // Overload errors
+            SuiError::TooManyTransactionsPendingExecution { .. } => (false, true),
+            SuiError::TooManyTransactionsPendingOnObject { .. } => (false, true),
             _ => (false, false),
+        }
+    }
+
+    pub fn is_object_or_package_not_found(&self) -> bool {
+        match self {
+            SuiError::UserInputError { error } => {
+                matches!(
+                    error,
+                    UserInputError::ObjectNotFound { .. }
+                        | UserInputError::DependentPackageNotFound { .. }
+                )
+            }
+            _ => false,
         }
     }
 }
@@ -702,7 +736,7 @@ pub fn convert_vm_error<
                         let offset = error.offsets().first().copied().map(|(f, i)| (f.0, i));
                         debug_assert!(
                             offset.is_some(),
-                            "Move should set the location on all execution errors"
+                            "Move should set the location on all execution errors. Error {error}"
                         );
                         let (function, instruction) = offset.unwrap_or((0, 0));
                         let function_name = vm.load_module(id, state_view).ok().map(|module| {
