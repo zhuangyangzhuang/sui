@@ -8,6 +8,9 @@ use fastcrypto::encoding::{Base58, Encoding};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, Bytes};
+
+pub const SHA3_DIGEST_LENGTH: usize = 32;
+
 /// A representation of a SHA3-256 Digest
 #[serde_as]
 #[derive(
@@ -16,18 +19,19 @@ use serde_with::{serde_as, Bytes};
 pub struct Sha3Digest(
     #[schemars(with = "Base58")]
     #[serde_as(as = "Readable<Base58, Bytes>")]
-    [u8; 32],
+    [u8; SHA3_DIGEST_LENGTH],
 );
 
 impl Sha3Digest {
-    pub const ZERO: Self = Sha3Digest([0; 32]);
+    pub const LENGTH: usize = SHA3_DIGEST_LENGTH;
+    pub const ZERO: Self = Sha3Digest([0; Self::LENGTH]);
 
-    pub const fn new(digest: [u8; 32]) -> Self {
+    pub const fn new(digest: [u8; Self::LENGTH]) -> Self {
         Self(digest)
     }
 
     pub fn generate<R: rand::RngCore + rand::CryptoRng>(mut rng: R) -> Self {
-        let mut bytes = [0; 32];
+        let mut bytes = [0; Self::LENGTH];
         rng.fill_bytes(&mut bytes);
         Self(bytes)
     }
@@ -36,11 +40,11 @@ impl Sha3Digest {
         Self::generate(rand::thread_rng())
     }
 
-    pub const fn inner(&self) -> &[u8; 32] {
+    pub const fn inner(&self) -> &[u8; Self::LENGTH] {
         &self.0
     }
 
-    pub const fn into_inner(self) -> [u8; 32] {
+    pub const fn into_inner(self) -> [u8; Self::LENGTH] {
         self.0
     }
 }
@@ -51,20 +55,20 @@ impl AsRef<[u8]> for Sha3Digest {
     }
 }
 
-impl AsRef<[u8; 32]> for Sha3Digest {
-    fn as_ref(&self) -> &[u8; 32] {
+impl AsRef<[u8; Self::LENGTH]> for Sha3Digest {
+    fn as_ref(&self) -> &[u8; Self::LENGTH] {
         &self.0
     }
 }
 
-impl From<Sha3Digest> for [u8; 32] {
+impl From<Sha3Digest> for [u8; SHA3_DIGEST_LENGTH] {
     fn from(digest: Sha3Digest) -> Self {
         digest.into_inner()
     }
 }
 
-impl From<[u8; 32]> for Sha3Digest {
-    fn from(digest: [u8; 32]) -> Self {
+impl From<[u8; Self::LENGTH]> for Sha3Digest {
+    fn from(digest: [u8; Self::LENGTH]) -> Self {
         Self::new(digest)
     }
 }
@@ -284,6 +288,7 @@ impl fmt::UpperHex for CheckpointContentsDigest {
 pub struct TransactionDigest(Sha3Digest);
 
 impl TransactionDigest {
+    pub const LENGTH: usize = Sha3Digest::LENGTH;
     pub const ZERO: Self = Self(Sha3Digest::ZERO);
 
     pub const fn new(digest: [u8; 32]) -> Self {

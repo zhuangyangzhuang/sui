@@ -31,6 +31,9 @@ use self::{
     address::{AddressFromBytesCostParams, AddressFromU256CostParams, AddressToU256CostParams},
     crypto::{bls12381, ecdsa_k1, ecdsa_r1, ecvrf, ed25519, groth16, hash, hmac, tbls},
     event::EventEmitCostParams,
+    object::{BorrowUidCostParams, DeleteImplCostParams, RecordNewIdCostParams},
+    types::TypeIsOneTimeWitnessCostParams,
+    validator::ValidatorValidateMetadataBcsCostParams, tx_context::TxContextDeriveIdCostParams,
 };
 
 #[derive(Tid)]
@@ -39,6 +42,13 @@ pub struct NativesCostTable {
     pub address_to_u256_cost_params: AddressToU256CostParams,
     pub address_from_u256_cost_params: AddressFromU256CostParams,
     pub event_emit_cost_params: EventEmitCostParams,
+    pub borrow_uid_cost_params: BorrowUidCostParams,
+    pub delete_impl_cost_params: DeleteImplCostParams,
+    pub record_new_id_cost_params: RecordNewIdCostParams,
+
+    pub is_one_time_witness: TypeIsOneTimeWitnessCostParams,
+    pub validate_metadata_bcs_cost_params: ValidatorValidateMetadataBcsCostParams,
+    pub tx_context_derive_id_cost_params: TxContextDeriveIdCostParams,
 }
 
 impl NativesCostTable {
@@ -78,6 +88,9 @@ impl NativesCostTable {
                     .into(),
                 event_emit_cost_per_byte: protocol_config.event_emit_cost_per_byte().into(),
             },
+            borrow_uid_cost_params: todo!(),
+            delete_impl_cost_params: todo!(),
+            record_new_id_cost_params: todo!(),
         }
     }
 }

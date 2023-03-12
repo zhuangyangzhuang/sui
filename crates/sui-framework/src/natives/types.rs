@@ -4,6 +4,7 @@
 use crate::legacy_length_cost;
 use move_binary_format::errors::PartialVMResult;
 use move_core_types::{
+    gas_algebra::InternalGas,
     language_storage::TypeTag,
     value::{MoveFieldLayout, MoveStructLayout, MoveTypeLayout},
 };
@@ -14,6 +15,9 @@ use move_vm_types::{
 use smallvec::smallvec;
 use std::collections::VecDeque;
 
+pub struct TypeIsOneTimeWitnessCostParams_ {
+    pub is_one_time_witness_cost_base: InternalGas,
+}
 pub fn is_one_time_witness(
     context: &mut NativeContext,
     mut ty_args: Vec<Type>,
