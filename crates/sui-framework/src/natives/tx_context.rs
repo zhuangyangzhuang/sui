@@ -15,8 +15,9 @@ use sui_types::base_types::{ObjectID, TransactionDigest};
 
 use crate::natives::{object_runtime::ObjectRuntime, NativesCostTable};
 
+#[derive(Clone)]
 pub struct TxContextDeriveIdCostParams {
-    pub calculate_tx_digest_cost_base: InternalGas,
+    pub tx_context_derive_id_cost_base: InternalGas,
     pub calculate_tx_digest_cost_per_byte: InternalGas,
     pub derive_address_cost_per_byte: InternalGas,
     pub record_new_id_cost: InternalGas,
@@ -35,13 +36,15 @@ pub fn derive_id(
     debug_assert!(ty_args.is_empty());
     debug_assert!(args.len() == 2);
     let mut gas_left = context.gas_budget();
-    let natvies_cost_table: &NativesCostTable = context.extensions_mut().get();
-    let tx_context_derive_id_cost_params = &natvies_cost_table.tx_context_derive_id_cost_params;
+    let tx_context_derive_id_cost_params = context
+        .extensions_mut()
+        .get::<NativesCostTable>()
+        .tx_context_derive_id_cost_params.clone();
 
     native_charge_gas_early_exit!(
         context,
         gas_left,
-        tx_context_derive_id_cost_params.calculate_tx_digest_cost_base
+        tx_context_derive_id_cost_params.tx_context_derive_id_cost_base
     );
 
     let ids_created = pop_arg!(args, u64);

@@ -1,10 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    legacy_emit_cost,
-    natives::{object_runtime::ObjectRuntime, NativesCostTable},
-};
+use crate::natives::{object_runtime::ObjectRuntime, NativesCostTable};
 use move_binary_format::errors::PartialVMResult;
 use move_core_types::{account_address::AccountAddress, gas_algebra::InternalGas};
 use move_vm_runtime::{
@@ -20,12 +17,12 @@ use smallvec::smallvec;
 use std::collections::VecDeque;
 
 pub struct BorrowUidCostParams {
-    pub obj_borrow_field_cost: InternalGas,
+    pub object_borrow_uid_cost_base: InternalGas,
 }
 /***************************************************************************************************
  * native fun borrow_uid
  * Implementation of the Move native function `borrow_uid<T: key>(obj: &T): &UID`
- *   gas cost: obj_borrow_field_cost                | this is hard to calculate. Making it flat
+ *   gas cost: cost_base                | this is hard to calculate. Making it flat
  **************************************************************************************************/
 pub fn borrow_uid(
     context: &mut NativeContext,
@@ -35,14 +32,12 @@ pub fn borrow_uid(
     debug_assert!(ty_args.len() == 1);
     debug_assert!(args.len() == 1);
     let mut gas_left = context.gas_budget();
-    let natvies_cost_table: &NativesCostTable = context.extensions_mut().get();
-    let borrow_uid_cost_params = &natvies_cost_table.borrow_uid_cost_params;
+    let borrow_uid_cost_params = &context
+        .extensions_mut()
+        .get::<NativesCostTable>()
+        .borrow_uid_cost_params;
 
-    native_charge_gas_early_exit!(
-        context,
-        gas_left,
-        borrow_uid_cost_params.obj_borrow_field_cost
-    );
+    native_charge_gas_early_exit!(context, gas_left, borrow_uid_cost_params.object_borrow_uid_cost_base);
 
     let obj = pop_arg!(args, StructRef);
     let id_field = obj.borrow_field(0)?;
@@ -54,12 +49,12 @@ pub fn borrow_uid(
 }
 
 pub struct DeleteImplCostParams {
-    pub delete_id_cost: InternalGas,
+    pub object_delete_impl_cost_base: InternalGas,
 }
 /***************************************************************************************************
  * native fun delete_impl
  * Implementation of the Move native function `delete_impl(id: address)`
- *   gas cost: delete_id_cost                | this is a simple ID deletion
+ *   gas cost: cost_base                | this is a simple ID deletion
  **************************************************************************************************/
 pub fn delete_impl(
     context: &mut NativeContext,
@@ -69,9 +64,11 @@ pub fn delete_impl(
     debug_assert!(ty_args.is_empty());
     debug_assert!(args.len() == 1);
     let mut gas_left = context.gas_budget();
-    let natvies_cost_table: &NativesCostTable = context.extensions_mut().get();
-    let delete_impl_cost_params = &natvies_cost_table.delete_impl_cost_params;
-    native_charge_gas_early_exit!(context, gas_left, delete_impl_cost_params.delete_id_cost);
+    let delete_impl_cost_params = &context
+        .extensions_mut()
+        .get::<NativesCostTable>()
+        .delete_impl_cost_params;
+    native_charge_gas_early_exit!(context, gas_left, delete_impl_cost_params.object_delete_impl_cost_base);
 
     // unwrap safe because the interface of native function guarantees it.
     let uid_bytes = pop_arg!(args, AccountAddress);
@@ -85,12 +82,12 @@ pub fn delete_impl(
 }
 
 pub struct RecordNewIdCostParams {
-    pub record_new_id_cost: InternalGas,
+    pub object_record_new_uid_cost_base: InternalGas,
 }
 /***************************************************************************************************
  * native fun record_new_uid
  * Implementation of the Move native function `record_new_uid(id: address)`
- *   gas cost: record_new_id_cost                | this is a simple ID addition
+ *   gas cost: cost_base                | this is a simple ID addition
  **************************************************************************************************/
 // native fun record_new_uid(id: address);
 pub fn record_new_uid(
@@ -101,13 +98,11 @@ pub fn record_new_uid(
     debug_assert!(ty_args.is_empty());
     debug_assert!(args.len() == 1);
     let mut gas_left = context.gas_budget();
-    let natvies_cost_table: &NativesCostTable = context.extensions_mut().get();
-    let record_new_id_cost_params = &natvies_cost_table.record_new_id_cost_params;
-    native_charge_gas_early_exit!(
-        context,
-        gas_left,
-        record_new_id_cost_params.record_new_id_cost
-    );
+    let record_new_id_cost_params = &context
+        .extensions_mut()
+        .get::<NativesCostTable>()
+        .record_new_id_cost_params;
+    native_charge_gas_early_exit!(context, gas_left, record_new_id_cost_params.object_record_new_uid_cost_base);
 
     // unwrap safe because the interface of native function guarantees it.
     let uid_bytes = pop_arg!(args, AccountAddress);

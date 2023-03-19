@@ -47,8 +47,9 @@ pub(crate) fn is_otw_struct(struct_layout: &MoveStructLayout, type_tag: &TypeTag
         TypeTag::Struct(struct_tag) if has_one_bool_field && struct_tag.name.to_string() == struct_tag.module.to_string().to_ascii_uppercase())
 }
 
+#[derive(Clone)]
 pub struct TypeIsOneTimeWitnessCostParams {
-    pub is_one_time_witness_cost_base: InternalGas,
+    pub type_is_one_time_witness_cost_base: InternalGas,
     pub type_to_type_tag_cost_per_byte: InternalGas,
     pub type_to_type_layout_cost_per_byte: InternalGas,
     pub struct_layout_check_cost_per_byte: InternalGas,
@@ -69,9 +70,11 @@ pub fn is_one_time_witness(
     debug_assert!(ty_args.len() == 1);
     debug_assert!(args.len() == 1);
     let mut gas_left = context.gas_budget();
-    let natvies_cost_table: &NativesCostTable = context.extensions_mut().get();
-    let type_is_one_time_witness_cost_params =
-        &natvies_cost_table.type_is_one_time_witness_cost_params;
+    let type_is_one_time_witness_cost_params = context
+        .extensions_mut()
+        .get::<NativesCostTable>()
+        .type_is_one_time_witness_cost_params
+        .clone();
 
     // unwrap safe because the interface of native function guarantees it.
     let ty = ty_args.pop().unwrap();
@@ -79,7 +82,7 @@ pub fn is_one_time_witness(
     native_charge_gas_early_exit!(
         context,
         gas_left,
-        type_is_one_time_witness_cost_params.is_one_time_witness_cost_base
+        type_is_one_time_witness_cost_params.type_is_one_time_witness_cost_base
     );
 
     let type_size: u64 = ty.size().into();

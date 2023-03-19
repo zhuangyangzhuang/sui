@@ -16,6 +16,7 @@ use sui_types::error::VMMemoryLimitExceededSubStatusCode;
 
 #[derive(Clone, Debug)]
 pub struct EventEmitCostParams {
+    pub event_emit_cost_base: InternalGas,
     pub event_value_size_derivation_cost_per_byte: InternalGas,
     pub event_tag_size_derivation_cost_per_byte: InternalGas,
     pub event_emit_cost_per_byte: InternalGas,
@@ -40,6 +41,12 @@ pub fn emit(
         let natvies_cost_table: &NativesCostTable = context.extensions().get();
         natvies_cost_table.event_emit_cost_params.clone()
     };
+
+    native_charge_gas_early_exit!(
+        context,
+        gas_left,
+        event_emit_cost_params.event_emit_cost_base
+    );
 
     let ty = ty_args.pop().unwrap();
     let event_value = args.pop_back().unwrap();

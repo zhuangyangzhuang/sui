@@ -15,7 +15,7 @@ use std::{collections::VecDeque, ops::Mul};
 use sui_types::sui_system_state::sui_system_state_inner_v1::ValidatorMetadataV1;
 
 pub struct ValidatorValidateMetadataBcsCostParams {
-    pub metadata_validate_cost_base: InternalGas,
+    pub validator_validate_metadata_cost_base: InternalGas,
     pub metadata_deserialize_cost_per_byte: InternalGas,
     pub metadata_verify_cost_per_byte: InternalGas,
 }
@@ -34,15 +34,17 @@ pub fn validate_metadata_bcs(
     debug_assert!(ty_args.is_empty());
     debug_assert!(args.len() == 1);
     let mut gas_left = context.gas_budget();
-    let natvies_cost_table: &NativesCostTable = context.extensions_mut().get();
-    let validate_metadata_bcs_cost_params = &natvies_cost_table.validate_metadata_bcs_cost_params;
+    let validate_metadata_bcs_cost_params = &context
+        .extensions_mut()
+        .get::<NativesCostTable>()
+        .validate_metadata_bcs_cost_params;
 
     let metadata_bytes = pop_arg!(args, Vec<u8>);
 
     native_charge_gas_early_exit!(
         context,
         gas_left,
-        validate_metadata_bcs_cost_params.metadata_validate_cost_base
+        validate_metadata_bcs_cost_params.validator_validate_metadata_cost_base
     );
 
     native_charge_gas_early_exit!(

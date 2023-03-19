@@ -351,19 +351,23 @@ pub struct ProtocolConfig {
     /// === Native Function Costs ===
 
     /// Cost params for the Move native function `address::from_bytes(bytes: vector<u8>)`
+    address_from_bytes_cost_base: Option<u64>,
     copy_bytes_to_address_cost_per_byte: Option<u64>,
 
     /// Cost params for the Move native function `address::to_u256(address): u256`
+    address_to_u256_cost_base: Option<u64>,
     address_to_vec_cost_per_byte: Option<u64>,
     address_vec_reverse_cost_per_byte: Option<u64>,
     copy_convert_to_u256_cost_per_byte: Option<u64>,
 
     /// Cost params for the Move native function `address::from_u256(u256): address`
+    address_from_u256_cost_base: Option<u64>,
     u256_to_bytes_to_vec_cost_per_byte: Option<u64>,
     u256_bytes_vec_reverse_cost_per_byte: Option<u64>,
     copy_convert_to_address_cost_per_byte: Option<u64>,
 
     /// Cost params for the Move native function `event::emit<T: copy + drop>(event: T)`
+    event_emit_cost_base: Option<u64>,
     event_value_size_derivation_cost_per_byte: Option<u64>,
     event_tag_size_derivation_cost_per_byte: Option<u64>,
     event_emit_cost_per_byte: Option<u64>,

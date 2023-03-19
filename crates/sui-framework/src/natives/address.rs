@@ -16,6 +16,8 @@ use std::{collections::VecDeque, ops::Mul};
 const E_ADDRESS_PARSE_ERROR: u64 = 0;
 
 pub struct AddressFromBytesCostParams {
+    pub address_from_bytes_cost_base: InternalGas,
+
     pub copy_bytes_to_address_cost_per_byte: InternalGas,
 }
 /***************************************************************************************************
@@ -32,8 +34,10 @@ pub fn from_bytes(
     debug_assert!(ty_args.is_empty());
     debug_assert!(args.len() == 1);
     let mut gas_left = context.gas_budget();
-    let natvies_cost_table: &NativesCostTable = context.extensions_mut().get();
-    let address_from_bytes_cost_params = &natvies_cost_table.address_from_bytes_cost_params;
+    let address_from_bytes_cost_params = &context
+        .extensions_mut()
+        .get::<NativesCostTable>()
+        .address_from_bytes_cost_params;
 
     let addr_bytes = pop_arg!(args, Vec<u8>);
     // Copying bytes is a simple low-cost operation
@@ -55,6 +59,8 @@ pub fn from_bytes(
 }
 
 pub struct AddressToU256CostParams {
+    pub address_to_u256_cost_base: InternalGas,
+
     pub address_to_vec_cost_per_byte: InternalGas,
     pub address_vec_reverse_cost_per_byte: InternalGas,
     pub copy_convert_to_u256_cost_per_byte: InternalGas,
@@ -74,8 +80,10 @@ pub fn to_u256(
     debug_assert!(ty_args.is_empty());
     debug_assert!(args.len() == 1);
     let mut gas_left = context.gas_budget();
-    let natvies_cost_table: &NativesCostTable = context.extensions_mut().get();
-    let address_to_u256_cost_params = &natvies_cost_table.address_to_u256_cost_params;
+    let address_to_u256_cost_params = &context
+        .extensions_mut()
+        .get::<NativesCostTable>()
+        .address_to_u256_cost_params;
 
     let addr = pop_arg!(args, AccountAddress);
     // Copying bytes is a simple low-cost operation
@@ -114,6 +122,8 @@ pub fn to_u256(
 }
 
 pub struct AddressFromU256CostParams {
+    pub address_from_u256_cost_base: InternalGas,
+
     pub u256_to_bytes_to_vec_cost_per_byte: InternalGas,
     pub u256_bytes_vec_reverse_cost_per_byte: InternalGas,
     pub copy_convert_to_address_cost_per_byte: InternalGas,
@@ -133,8 +143,10 @@ pub fn from_u256(
     debug_assert!(ty_args.is_empty());
     debug_assert!(args.len() == 1);
     let mut gas_left = context.gas_budget();
-    let natvies_cost_table: &NativesCostTable = context.extensions_mut().get();
-    let address_from_u256_cost_params = &natvies_cost_table.address_from_u256_cost_params;
+    let address_from_u256_cost_params = &context
+        .extensions_mut()
+        .get::<NativesCostTable>()
+        .address_from_u256_cost_params;
 
     let u256 = pop_arg!(args, U256);
 

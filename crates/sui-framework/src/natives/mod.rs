@@ -29,9 +29,28 @@ use sui_protocol_config::ProtocolConfig;
 
 use self::{
     address::{AddressFromBytesCostParams, AddressFromU256CostParams, AddressToU256CostParams},
-    crypto::{bls12381, ecdsa_k1, ecdsa_r1, ecvrf, ed25519, groth16, hash, hmac},
+    crypto::{
+        bls12381::{self, Bls12381MinPkVerifyCostParams, Bls12381MinSigVerifyCostParams},
+        ecdsa_k1::{
+            self, EcdsaK1DecompressPubkeyCostParams, EcdsaK1EcRecoverCostParams,
+            EcdsaK1Secp256K1VerifyCostParams,
+        },
+        ecdsa_r1::{self, EcdsaR1EcRecoverCostParams, EcdsaR1Secp256R1VerifyCostParams},
+        ecvrf::{self, EcvrfEcvrfVerifyCostParams},
+        ed25519::{self, Ed25519VerifyCostParams},
+        groth16::{
+            self, Groth16PrepareVerifyingKeyCostParams, Groth16VerifyGroth16ProofInternalCostParams,
+        },
+        hash::{self, HashBlake2b256CostParams, HashKeccak256CostParams},
+        hmac::{self, HmacHmacSha3256CostParams},
+    },
+    dynamic_field::*,
     event::EventEmitCostParams,
     object::{BorrowUidCostParams, DeleteImplCostParams, RecordNewIdCostParams},
+    transfer::{
+        FreezeObjectCostParams, ObjectRuntimeTransferCostParams, ShareObjectCostParams,
+        TransferInternalCostParams,
+    },
     tx_context::TxContextDeriveIdCostParams,
     types::TypeIsOneTimeWitnessCostParams,
     validator::ValidatorValidateMetadataBcsCostParams,
@@ -39,26 +58,84 @@ use self::{
 
 #[derive(Tid)]
 pub struct NativesCostTable {
+    // address
     pub address_from_bytes_cost_params: AddressFromBytesCostParams,
     pub address_to_u256_cost_params: AddressToU256CostParams,
     pub address_from_u256_cost_params: AddressFromU256CostParams,
+
+    // dynamic_field
+    pub hash_type_and_key_cost_params: HashTypeAndKeyCostParams,
+    pub add_child_object_cost_params: AddChildObjectCostParams,
+    pub borrow_child_object_cost_params: BorrowChildObjectCostParams,
+    pub remove_child_object_cost_params: RemoveChildObjectCostParams,
+    pub has_child_object_cost_params: HasChildObjectCostParams,
+    pub has_child_object_with_ty_cost_params: HasChildObjectWithTyCostParams,
+
+    // event
     pub event_emit_cost_params: EventEmitCostParams,
+
+    // object
     pub borrow_uid_cost_params: BorrowUidCostParams,
     pub delete_impl_cost_params: DeleteImplCostParams,
     pub record_new_id_cost_params: RecordNewIdCostParams,
 
-    pub type_is_one_time_witness_cost_params: TypeIsOneTimeWitnessCostParams,
-    pub validate_metadata_bcs_cost_params: ValidatorValidateMetadataBcsCostParams,
+    // transfer
+    pub transfer_internal_cost_params: TransferInternalCostParams,
+    pub freeze_object_cost_params: FreezeObjectCostParams,
+    pub share_object_cost_params: ShareObjectCostParams,
+    pub object_runtime_transfer_cost_params: ObjectRuntimeTransferCostParams,
+
+    // tx_context
     pub tx_context_derive_id_cost_params: TxContextDeriveIdCostParams,
+
+    // type
+    pub type_is_one_time_witness_cost_params: TypeIsOneTimeWitnessCostParams,
+
+    // validator
+    pub validate_metadata_bcs_cost_params: ValidatorValidateMetadataBcsCostParams,
+
+    // Crypto: naming convention is module name prepended to function name in camel case
+    // bls12381
+    pub bls12381_min_sig_verify_cost_params: Bls12381MinSigVerifyCostParams,
+    pub bls12381_min_pk_verify_cost_params: Bls12381MinPkVerifyCostParams,
+
+    // ecdsa_k1
+    pub ecdsa_k1_ecrecover_cost_params: EcdsaK1EcRecoverCostParams,
+    pub ecdsa_k1_decompress_pubkey_cost_params: EcdsaK1DecompressPubkeyCostParams,
+    pub ecdsa_k1_secp256k1_verify_cost_params: EcdsaK1Secp256K1VerifyCostParams,
+
+    // ecdsa_r1
+    pub ecdsa_r1_ecrecover_cost_params: EcdsaR1EcRecoverCostParams,
+    pub ecdsa_r1_secp256r1_verify_cost_params: EcdsaR1Secp256R1VerifyCostParams,
+
+    // ecvrf
+    pub ecvrf_ecvrf_verify_cost_params: EcvrfEcvrfVerifyCostParams,
+
+    // ed25519
+    pub ed25519_verify_cost_params: Ed25519VerifyCostParams,
+
+    // groth16
+    pub groth16_prepare_verifying_key_cost_params: Groth16PrepareVerifyingKeyCostParams,
+    pub groth16_pverify_groth16_proof_internal_cost_params:
+        Groth16VerifyGroth16ProofInternalCostParams,
+
+    // hash
+    pub hash_keccak256_cost_params: HashKeccak256CostParams,
+    pub hash_blake2b256_cost_params: HashBlake2b256CostParams,
+
+    // hmac
+    pub hmac_hmac_sha3256_cost_params: HmacHmacSha3256CostParams,
 }
 
 impl NativesCostTable {
     pub fn from_protocol_config(protocol_config: &ProtocolConfig) -> NativesCostTable {
         Self {
+            // Address
             address_from_bytes_cost_params: AddressFromBytesCostParams {
                 copy_bytes_to_address_cost_per_byte: protocol_config
                     .copy_bytes_to_address_cost_per_byte()
                     .into(),
+                address_from_bytes_cost_base: todo!(),
             },
             address_to_u256_cost_params: AddressToU256CostParams {
                 address_to_vec_cost_per_byte: protocol_config.address_to_vec_cost_per_byte().into(),
@@ -68,6 +145,7 @@ impl NativesCostTable {
                 copy_convert_to_u256_cost_per_byte: protocol_config
                     .copy_convert_to_u256_cost_per_byte()
                     .into(),
+                address_to_u256_cost_base: todo!(),
             },
             address_from_u256_cost_params: AddressFromU256CostParams {
                 u256_to_bytes_to_vec_cost_per_byte: protocol_config
@@ -79,7 +157,26 @@ impl NativesCostTable {
                 copy_convert_to_address_cost_per_byte: protocol_config
                     .u256_bytes_vec_reverse_cost_per_byte()
                     .into(),
+                address_from_u256_cost_base: todo!(),
             },
+
+            // Dynamic Fields
+            hash_type_and_key_cost_params: HashTypeAndKeyCostParams {
+                dynamic_field_hash_type_and_key_cost_base: todo!(),
+                type_to_type_tag_cost_per_byte: todo!(),
+                type_to_type_layout_cost_per_byte: todo!(),
+                parent_derive_dynamic_field_id_cost_per_byte: todo!(),
+                type_tag_derive_dynamic_field_id_cost_per_byte: todo!(),
+                type_layout_derive_dynamic_field_id_cost_per_byte: todo!(),
+                value_derive_dynamic_field_id_cost_per_byte: todo!(),
+            },
+            add_child_object_cost_params: todo!(),
+            borrow_child_object_cost_params: todo!(),
+            remove_child_object_cost_params: todo!(),
+            has_child_object_cost_params: todo!(),
+            has_child_object_with_ty_cost_params: todo!(),
+
+            // Event
             event_emit_cost_params: EventEmitCostParams {
                 event_value_size_derivation_cost_per_byte: protocol_config
                     .event_value_size_derivation_cost_per_byte()
@@ -88,10 +185,59 @@ impl NativesCostTable {
                     .event_tag_size_derivation_cost_per_byte()
                     .into(),
                 event_emit_cost_per_byte: protocol_config.event_emit_cost_per_byte().into(),
+                event_emit_cost_base: todo!(),
             },
+
+            // Object
             borrow_uid_cost_params: todo!(),
             delete_impl_cost_params: todo!(),
             record_new_id_cost_params: todo!(),
+
+            // Transfer
+            object_runtime_transfer_cost_params: todo!(),
+            transfer_internal_cost_params: todo!(),
+            freeze_object_cost_params: todo!(),
+            share_object_cost_params: todo!(),
+
+            // Tx Context
+            tx_context_derive_id_cost_params: todo!(),
+
+            // Type
+            type_is_one_time_witness_cost_params: todo!(),
+
+            // Validator
+            validate_metadata_bcs_cost_params: todo!(),
+
+            // <---- Crypto ----->
+            // bls12381
+            bls12381_min_sig_verify_cost_params: todo!(),
+            bls12381_min_pk_verify_cost_params: todo!(),
+
+            // ecdsa k1
+            ecdsa_k1_ecrecover_cost_params: todo!(),
+            ecdsa_k1_decompress_pubkey_cost_params: todo!(),
+            ecdsa_k1_secp256k1_verify_cost_params: todo!(),
+
+            // ecdsa r1
+            ecdsa_r1_ecrecover_cost_params: todo!(),
+            ecdsa_r1_secp256r1_verify_cost_params: todo!(),
+
+            // ecvrf
+            ecvrf_ecvrf_verify_cost_params: todo!(),
+
+            // ed25519
+            ed25519_verify_cost_params: todo!(),
+
+            // groth16
+            groth16_prepare_verifying_key_cost_params: todo!(),
+            groth16_pverify_groth16_proof_internal_cost_params: todo!(),
+
+            // hash
+            hash_keccak256_cost_params: todo!(),
+            hash_blake2b256_cost_params: todo!(),
+
+            // hmac
+            hmac_hmac_sha3256_cost_params: todo!(),
         }
     }
 }

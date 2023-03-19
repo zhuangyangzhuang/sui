@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{legacy_test_cost, natives::types::is_otw_struct};
+use crate::{natives::types::is_otw_struct, natives_test_cost};
 use move_binary_format::errors::PartialVMResult;
 use move_core_types::{gas_algebra::InternalGas, value::MoveTypeLayout};
 use move_vm_runtime::native_functions::NativeContext;
@@ -17,7 +17,7 @@ pub fn destroy(
     mut args: VecDeque<Value>,
 ) -> PartialVMResult<NativeResult> {
     args.pop_back();
-    Ok(NativeResult::ok(legacy_test_cost(), smallvec![]))
+    Ok(NativeResult::ok(natives_test_cost(), smallvec![]))
 }
 
 pub fn create_one_time_witness(
@@ -38,7 +38,7 @@ pub fn create_one_time_witness(
 
     if is_otw_struct(&struct_layout, &type_tag) {
         Ok(NativeResult::ok(
-            legacy_test_cost(),
+            natives_test_cost(),
             smallvec![Value::struct_(move_vm_types::values::Struct::pack(vec![
                 Value::bool(true)
             ]))],

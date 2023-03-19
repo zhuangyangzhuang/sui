@@ -461,6 +461,10 @@ impl Owner {
     pub fn is_shared(&self) -> bool {
         matches!(self, Owner::Shared { .. })
     }
+
+    pub fn object_size_for_gas_metering() -> u64 {
+        SuiAddress::LENGTH as u64
+    }
 }
 
 impl PartialEq<SuiAddress> for Owner {

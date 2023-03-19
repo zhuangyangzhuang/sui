@@ -76,26 +76,10 @@ pub fn get_move_stdlib_test() -> Vec<CompiledModule> {
 
 pub const DEFAULT_FRAMEWORK_PATH: &str = env!("CARGO_MANIFEST_DIR");
 
-// // TODO: remove these in favor of new costs
-// pub fn legacy_test_cost() -> InternalGas {
-//     InternalGas::new(0)
-// }
+pub fn natives_test_cost() -> InternalGas {
+    InternalGas::new(0)
+}
 
-// pub fn legacy_emit_cost() -> InternalGas {
-//     InternalGas::new(52)
-// }
-
-// pub fn legacy_create_signer_cost() -> InternalGas {
-//     InternalGas::new(24)
-// }
-
-// pub fn legacy_empty_cost() -> InternalGas {
-//     InternalGas::new(84)
-// }
-
-// pub fn legacy_length_cost() -> InternalGas {
-//     InternalGas::new(98)
-// }
 
 /// Wrapper of the build command that verifies the framework version. Should eventually be removed once we can
 /// do this in the obvious way (via version checks)

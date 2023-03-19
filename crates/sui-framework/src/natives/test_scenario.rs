@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    legacy_test_cost,
     natives::{
         get_nth_struct_field,
         object_runtime::{ObjectRuntime, RuntimeResults},
     },
+    natives_test_cost,
 };
 use linked_hash_map::LinkedHashMap;
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
@@ -80,7 +80,7 @@ pub fn end_transaction(
         Ok(res) => res,
         Err(_) => {
             return Ok(NativeResult::err(
-                legacy_test_cost(),
+                natives_test_cost(),
                 E_COULD_NOT_GENERATE_EFFECTS,
             ));
         }
@@ -189,7 +189,7 @@ pub fn end_transaction(
     // if incorrect handling, return with an 'abort'
     if incorrect_shared_or_imm_handling {
         return Ok(NativeResult::err(
-            legacy_test_cost(),
+            natives_test_cost(),
             E_INVALID_SHARED_OR_IMMUTABLE_USAGE,
         ));
     }
@@ -219,7 +219,7 @@ pub fn end_transaction(
         {
             if !value.equals(prev_value)? {
                 return Ok(NativeResult::err(
-                    legacy_test_cost(),
+                    natives_test_cost(),
                     E_INVALID_SHARED_OR_IMMUTABLE_USAGE,
                 ));
             }
@@ -245,7 +245,7 @@ pub fn end_transaction(
         transferred,
         user_events.len() as u64,
     );
-    Ok(NativeResult::ok(legacy_test_cost(), smallvec![effects]))
+    Ok(NativeResult::ok(natives_test_cost(), smallvec![effects]))
 }
 
 // native fun take_from_address_by_id<T: key>(account: address, id: ID): T;
@@ -277,7 +277,7 @@ pub fn take_from_address_by_id(
         Owner::AddressOwner(account),
     );
     Ok(match res {
-        Ok(value) => NativeResult::ok(legacy_test_cost(), smallvec![value]),
+        Ok(value) => NativeResult::ok(natives_test_cost(), smallvec![value]),
         Err(native_err) => native_err,
     })
 }
@@ -305,7 +305,7 @@ pub fn ids_for_address(
         })
         .unwrap_or_default();
     let ids_vector = Value::vector_for_testing_only(ids);
-    Ok(NativeResult::ok(legacy_test_cost(), smallvec![ids_vector]))
+    Ok(NativeResult::ok(natives_test_cost(), smallvec![ids_vector]))
 }
 
 // native fun most_recent_id_for_address<T: key>(account: address): Option<ID>;
@@ -324,7 +324,7 @@ pub fn most_recent_id_for_address(
         Some(inv) => most_recent_at_ty(&inventories.taken, inv, specified_ty),
     };
     Ok(NativeResult::ok(
-        legacy_test_cost(),
+        natives_test_cost(),
         smallvec![most_recent_id],
     ))
 }
@@ -347,7 +347,7 @@ pub fn was_taken_from_address(
         .map(|owner| owner == &Owner::AddressOwner(account))
         .unwrap_or(false);
     Ok(NativeResult::ok(
-        legacy_test_cost(),
+        natives_test_cost(),
         smallvec![Value::bool(was_taken)],
     ))
 }
@@ -385,7 +385,7 @@ pub fn take_immutable_by_id(
                 .entry(specified_ty)
                 .or_default()
                 .insert(id, value.copy_value().unwrap());
-            NativeResult::ok(legacy_test_cost(), smallvec![value])
+            NativeResult::ok(natives_test_cost(), smallvec![value])
         }
         Err(native_err) => native_err,
     })
@@ -407,7 +407,7 @@ pub fn most_recent_immutable_id(
         specified_ty,
     );
     Ok(NativeResult::ok(
-        legacy_test_cost(),
+        natives_test_cost(),
         smallvec![most_recent_id],
     ))
 }
@@ -429,7 +429,7 @@ pub fn was_taken_immutable(
         .map(|owner| owner == &Owner::Immutable)
         .unwrap_or(false);
     Ok(NativeResult::ok(
-        legacy_test_cost(),
+        natives_test_cost(),
         smallvec![Value::bool(was_taken)],
     ))
 }
@@ -461,7 +461,7 @@ pub fn take_shared_by_id(
         Owner::Shared { initial_shared_version: /* dummy */ SequenceNumber::new() },
     );
     Ok(match res {
-        Ok(value) => NativeResult::ok(legacy_test_cost(), smallvec![value]),
+        Ok(value) => NativeResult::ok(natives_test_cost(), smallvec![value]),
         Err(native_err) => native_err,
     })
 }
@@ -482,7 +482,7 @@ pub fn most_recent_id_shared(
         specified_ty,
     );
     Ok(NativeResult::ok(
-        legacy_test_cost(),
+        natives_test_cost(),
         smallvec![most_recent_id],
     ))
 }
@@ -504,7 +504,7 @@ pub fn was_taken_shared(
         .map(|owner| matches!(owner, Owner::Shared { .. }))
         .unwrap_or(false);
     Ok(NativeResult::ok(
-        legacy_test_cost(),
+        natives_test_cost(),
         smallvec![Value::bool(was_taken)],
     ))
 }
@@ -523,7 +523,7 @@ fn take_from_inventory(
     let is_taken = taken.contains_key(&id);
     if is_taken || !is_in_inventory(&id) || obj_opt.is_none() {
         return Err(NativeResult::err(
-            legacy_test_cost(),
+            natives_test_cost(),
             E_OBJECT_NOT_FOUND_CODE,
         ));
     }
