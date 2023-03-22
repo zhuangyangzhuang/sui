@@ -21,14 +21,15 @@ use crate::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use crate::signature::{AuthenticatorTrait, GenericSignature};
 use crate::storage::{DeleteKind, WriteKind};
 use crate::{
-    SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION, SUI_SYSTEM_STATE_OBJECT_ID,
-    SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
+    SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION, SUI_FRAMEWORK_OBJECT_ID,
+    SUI_SYSTEM_STATE_OBJECT_ID, SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
 };
 use byteorder::{BigEndian, ReadBytesExt};
 use enum_dispatch::enum_dispatch;
 use fastcrypto::{encoding::Base64, hash::HashFunction};
 use itertools::Either;
 use move_binary_format::file_format::{CodeOffset, TypeParameterIndex};
+use move_core_types::ident_str;
 use move_core_types::identifier::IdentStr;
 use move_core_types::language_storage::ModuleId;
 use move_core_types::{identifier::Identifier, language_storage::TypeTag, value::MoveStructLayout};
@@ -360,9 +361,9 @@ pub enum Command {
     /// (public transfer) and either the previous owner must be an address or the object must
     /// be newly created.
     TransferObjects(Vec<Argument>, Argument),
-    /// `(&mut Coin<T>, u64)` -> `Coin<T>`
-    /// It splits off some amount into a new coin
-    SplitCoin(Argument, Argument),
+    /// `(&mut Coin<T>, Vec<u64>)` -> `Vec<Coin<T>>`
+    /// It splits off some amounts into a new coins with those amounts
+    SplitCoins(Argument, Vec<Argument>),
     /// `(&mut Coin<T>, Vec<Coin<T>>)`
     /// It merges n-coins into the first coin
     MergeCoins(Argument, Vec<Argument>),
@@ -500,7 +501,7 @@ impl Command {
             }
             Command::MakeMoveVec(None, _)
             | Command::TransferObjects(_, _)
-            | Command::SplitCoin(_, _)
+            | Command::SplitCoins(_, _)
             | Command::MergeCoins(_, _) => vec![],
         }
     }
@@ -508,7 +509,9 @@ impl Command {
     fn validity_check(&self, config: &ProtocolConfig) -> UserInputResult {
         match self {
             Command::MoveCall(call) => call.validity_check(config)?,
-            Command::TransferObjects(args, _) | Command::MergeCoins(_, args) => {
+            Command::TransferObjects(args, _)
+            | Command::MergeCoins(_, args)
+            | Command::SplitCoins(_, args) => {
                 fp_ensure!(!args.is_empty(), UserInputError::EmptyCommandInput);
                 fp_ensure!(
                     args.len() < config.max_arguments() as usize,
@@ -555,7 +558,6 @@ impl Command {
                     }
                 );
             }
-            Command::SplitCoin(_, _) => (),
             Command::Upgrade(modules, _, _, _) => {
                 fp_ensure!(!modules.is_empty(), UserInputError::EmptyCommandInput);
                 fp_ensure!(
@@ -715,7 +717,11 @@ impl Display for Command {
                 write_sep(f, objs, ",")?;
                 write!(f, "],{addr})")
             }
-            Command::SplitCoin(coin, amount) => write!(f, "SplitCoin({coin},{amount})"),
+            Command::SplitCoins(coin, amounts) => {
+                write!(f, "SplitCoins({coin}")?;
+                write_sep(f, amounts, ",")?;
+                write!(f, ")")
+            }
             Command::MergeCoins(target, coins) => {
                 write!(f, "MergeCoins({target},")?;
                 write_sep(f, coins, ",")?;
@@ -1328,6 +1334,71 @@ impl TransactionData {
         Self::new_programmable(sender, vec![gas_payment], pt, gas_budget, gas_price)
     }
 
+    pub fn new_upgrade(
+        sender: SuiAddress,
+        gas_payment: ObjectRef,
+        package_id: ObjectID,
+        modules: Vec<Vec<u8>>,
+        dep_ids: Vec<ObjectID>,
+        (upgrade_capability, capability_owner): (ObjectRef, Owner),
+        upgrade_policy: u8,
+        digest: Vec<u8>,
+        gas_budget: u64,
+        gas_price: u64,
+    ) -> anyhow::Result<Self> {
+        let pt = {
+            let mut builder = ProgrammableTransactionBuilder::new();
+            let capability_arg = match capability_owner {
+                Owner::AddressOwner(_) => ObjectArg::ImmOrOwnedObject(upgrade_capability),
+                Owner::Shared {
+                    initial_shared_version,
+                } => ObjectArg::SharedObject {
+                    id: upgrade_capability.0,
+                    initial_shared_version,
+                    mutable: true,
+                },
+                Owner::Immutable => {
+                    return Err(anyhow::anyhow!(
+                        "Upgrade capability is stored immutably and cannot be used for upgrades"
+                    ))
+                }
+                // If the capability is owned by an object, then the module defining the owning
+                // object gets to decide how the upgrade capability should be used.
+                Owner::ObjectOwner(_) => {
+                    return Err(anyhow::anyhow!("Upgrade capability controlled by object"))
+                }
+            };
+            builder.obj(capability_arg).unwrap();
+            let upgrade_arg = builder.pure(upgrade_policy).unwrap();
+            let digest_arg = builder.pure(digest).unwrap();
+            let upgrade_ticket = builder.programmable_move_call(
+                SUI_FRAMEWORK_OBJECT_ID,
+                ident_str!("package").to_owned(),
+                ident_str!("authorize_upgrade").to_owned(),
+                vec![],
+                vec![Argument::Input(0), upgrade_arg, digest_arg],
+            );
+            let upgrade_receipt = builder.upgrade(package_id, upgrade_ticket, dep_ids, modules);
+
+            builder.programmable_move_call(
+                SUI_FRAMEWORK_OBJECT_ID,
+                ident_str!("package").to_owned(),
+                ident_str!("commit_upgrade").to_owned(),
+                vec![],
+                vec![Argument::Input(0), upgrade_receipt],
+            );
+
+            builder.finish()
+        };
+        Ok(Self::new_programmable(
+            sender,
+            vec![gas_payment],
+            pt,
+            gas_budget,
+            gas_price,
+        ))
+    }
+
     pub fn new_programmable_with_dummy_gas_price(
         sender: SuiAddress,
         gas_payment: Vec<ObjectRef>,
@@ -1411,9 +1482,8 @@ pub trait TransactionDataAPI {
     #[cfg(test)]
     fn gas_data_mut(&mut self) -> &mut GasData;
 
-    // TODO: this should be #[cfg(test)], but for some reason it is not visible in
-    // authority_tests.rs even though that entire module is #[cfg(test)]
-    fn expiration_mut(&mut self) -> &mut TransactionExpiration;
+    // This should be used in testing only.
+    fn expiration_mut_for_testing(&mut self) -> &mut TransactionExpiration;
 }
 
 impl TransactionDataAPI for TransactionDataV1 {
@@ -1550,7 +1620,7 @@ impl TransactionDataAPI for TransactionDataV1 {
         &mut self.gas_data
     }
 
-    fn expiration_mut(&mut self) -> &mut TransactionExpiration {
+    fn expiration_mut_for_testing(&mut self) -> &mut TransactionExpiration {
         &mut self.expiration
     }
 }
@@ -2099,7 +2169,6 @@ impl PlainTransactionInfoResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HandleCertificateResponse {
     pub signed_effects: SignedTransactionEffects,
-    // TODO: Add a case for finalized transaction.
     pub events: TransactionEvents,
 }
 

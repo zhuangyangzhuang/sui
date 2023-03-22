@@ -249,7 +249,7 @@ sui client call --package 0x2 --module sui_system --function update_validator_na
 sui client call --package 0x2 --module sui_system --function update_validator_next_epoch_p2p_address --args 0x5 "[4, 192, 168, 1, 1]" --gas-budget 10000
 ```
 
-See the [full list of metadata update functions here](https://github.com/MystenLabs/sui/blob/main/crates/sui-framework/sources/governance/sui_system.move#L413-L553).
+See the [full list of metadata update functions here](https://github.com/MystenLabs/sui/blob/main/crates/sui-framework/packages/sui-system/sources/sui_system.move#L267-L444).
 
 ### Operation Cap
 
@@ -291,7 +291,7 @@ In order for a Sui address to join the validator set, they need to first sign up
 
 ```
 sui client call --package 0x2 --module sui_system --function request_add_validator_candidate --args 0x5 {protocol_pubkey_bytes {network_pubkey_bytes} {worker_pubkey_bytes} {proof_of_possession} {name} {description} {image_url} {project_url} {net_address}
-{p2p_address} {primary_address} {worker_address} {gas_price} {commission_rate}
+{p2p_address} {primary_address} {worker_address} {gas_price} {commission_rate} --gas-budget 10000
 ```
 
 After an address becomes a validator candidate, any address (including the candidate address itself) can start staking with the candidate's staking pool. Refer to our dedicated staking FAQ on how staking works. Once a candidate's staking pool has accumulated at least `sui_system::MIN_VALIDATOR_JOINING_STAKE` amount of stake, the candidate can call `sui_system::request_add_validator` to officially add themselves to next epoch's active validator set:

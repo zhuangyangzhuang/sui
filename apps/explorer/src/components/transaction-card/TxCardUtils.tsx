@@ -25,7 +25,6 @@ import { TxTimeType } from '../tx-time/TxTimeType';
 import styles from './RecentTxCard.module.css';
 
 import { AddressLink, TransactionLink } from '~/ui/InternalLink';
-import { TransactionType } from '~/ui/TransactionType';
 
 export type TxnData = {
     To?: string;
@@ -66,17 +65,20 @@ function TxTableHeader({ label }: { label: string }) {
     return <div className="pl-3">{label}</div>;
 }
 
-function TxTableCol({
+export function TxTableCol({
     isHighlightedOnHover,
+    isFirstCol,
     children,
 }: {
     isHighlightedOnHover?: boolean;
+    isFirstCol?: boolean;
     children: ReactNode;
 }) {
     return (
         <div
             className={clsx(
-                'flex h-full items-center rounded px-3',
+                'flex h-full items-center rounded',
+                !isFirstCol && 'px-3',
                 isHighlightedOnHover && 'hover:bg-sui-light'
             )}
         >
@@ -88,9 +90,13 @@ function TxTableCol({
 // Generate table data from the transaction data
 export const genTableDataFromTxData = (results: TxnData[]) => ({
     data: results.map((txn) => ({
-        date: <TxTimeType timestamp={txn.timestamp_ms} />,
+        date: (
+            <TxTableCol>
+                <TxTimeType timestamp={txn.timestamp_ms} />
+            </TxTableCol>
+        ),
         transactionId: (
-            <TxTableCol isHighlightedOnHover>
+            <TxTableCol isFirstCol isHighlightedOnHover>
                 <TransactionLink
                     digest={txn.txId}
                     before={
@@ -102,12 +108,6 @@ export const genTableDataFromTxData = (results: TxnData[]) => ({
                     }
                 />
             </TxTableCol>
-        ),
-        txTypes: (
-            <TransactionType
-                isSuccess={txn.status === 'success'}
-                type={txn.kind}
-            />
         ),
         amounts: (
             <TxTableCol>
@@ -127,7 +127,7 @@ export const genTableDataFromTxData = (results: TxnData[]) => ({
     })),
     columns: [
         {
-            header: () => <TxTableHeader label="Transaction ID" />,
+            header: 'Transaction ID',
             accessorKey: 'transactionId',
         },
         {

@@ -33,7 +33,6 @@ use typed_store::rocks::{
 };
 use typed_store::traits::{TableSummary, TypedStoreDebug};
 
-use crate::authority::authority_notify_read::NotifyRead;
 use crate::authority::epoch_start_configuration::EpochStartConfiguration;
 use crate::authority::{AuthorityStore, CertTxGuard, ResolverWrapper};
 use crate::batch_bls_verifier::*;
@@ -52,7 +51,8 @@ use crate::stake_aggregator::StakeAggregator;
 use move_bytecode_utils::module_cache::SyncModuleCache;
 use move_vm_runtime::move_vm::MoveVM;
 use move_vm_runtime::native_functions::NativeFunctionTable;
-use mysten_common::notify_once::NotifyOnce;
+use mysten_common::sync::notify_once::NotifyOnce;
+use mysten_common::sync::notify_read::NotifyRead;
 use mysten_metrics::monitored_scope;
 use prometheus::IntCounter;
 use std::cmp::Ordering as CmpOrdering;
@@ -70,7 +70,6 @@ use sui_types::sui_system_state::epoch_start_sui_system_state::{
     EpochStartSystemState, EpochStartSystemStateTrait,
 };
 use sui_types::temporary_store::InnerTemporaryStore;
-use sui_types::{MOVE_STDLIB_ADDRESS, SUI_FRAMEWORK_ADDRESS};
 use tokio::time::Instant;
 use typed_store::{retry_transaction_forever, Map};
 use typed_store_derive::DBMapUtils;
@@ -1908,8 +1907,7 @@ impl ExecutionComponents {
         store: Arc<AuthorityStore>,
         metrics: Arc<ResolverMetrics>,
     ) -> Self {
-        let native_functions =
-            sui_framework::natives::all_natives(MOVE_STDLIB_ADDRESS, SUI_FRAMEWORK_ADDRESS);
+        let native_functions = sui_framework::natives::all_natives();
         let move_vm = Arc::new(
             adapter::new_move_vm(native_functions.clone(), protocol_config)
                 .expect("We defined natives to not fail here"),
