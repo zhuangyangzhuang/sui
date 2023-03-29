@@ -1664,11 +1664,10 @@ pub async fn send_and_confirm_transaction_(
 
     // Collect signatures from a quorum of authorities
     let committee = authority.clone_committee_for_testing();
-    let certificate =
-        CertifiedTransaction::new(transaction.into_message(), vec![vote.clone()], &committee)
-            .unwrap()
-            .verify(&committee)
-            .unwrap();
+    let certificate = CertifiedTransaction::new(transaction.into_message(), &[vote], &committee)
+        .unwrap()
+        .verify(&committee)
+        .unwrap();
 
     if with_shared {
         send_consensus(authority, &certificate).await;
@@ -4366,7 +4365,7 @@ fn init_certified_transaction(
     let epoch_store = authority_state.epoch_store_for_testing();
     CertifiedTransaction::new(
         transaction.into_message(),
-        vec![vote.auth_sig().clone()],
+        &[vote.auth_sig().clone()],
         epoch_store.committee(),
     )
     .unwrap()
@@ -4770,7 +4769,7 @@ async fn make_test_transaction(
         let vote = response.status.into_signed_for_testing();
         sigs.push(vote.clone());
         if let Ok(cert) =
-            CertifiedTransaction::new(transaction.clone().into_message(), sigs.clone(), &committee)
+            CertifiedTransaction::new(transaction.clone().into_message(), &sigs, &committee)
         {
             return cert.verify(&committee).unwrap();
         }

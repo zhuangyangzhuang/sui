@@ -72,31 +72,6 @@ impl Committee {
         }
     }
 
-    /// Normalize the given weights to TOTAL_VOTING_POWER and create the committee.
-    /// Used for testing only: a production system is using the voting weights
-    /// of the Sui System object.
-    pub fn new_for_testing_with_normalized_voting_power(
-        epoch: EpochId,
-        mut voting_weights: BTreeMap<AuthorityName, StakeUnit>,
-    ) -> Self {
-        let num_nodes = voting_weights.len();
-        let total_votes: StakeUnit = voting_weights.iter().map(|(_, votes)| *votes).sum();
-
-        let normalization_coef = TOTAL_VOTING_POWER as f64 / total_votes as f64;
-        let mut total_sum = 0;
-        for (idx, (_auth, weight)) in voting_weights.iter_mut().enumerate() {
-            if idx < num_nodes - 1 {
-                *weight = (*weight as f64 * normalization_coef).floor() as u64; // adjust the weights following the normalization coef
-                total_sum += *weight;
-            } else {
-                // the last element is taking all the rest
-                *weight = TOTAL_VOTING_POWER - total_sum;
-            }
-        }
-
-        Self::new(epoch, voting_weights)
-    }
-
     // We call this if these have not yet been computed
     pub fn load_inner(
         voting_rights: &[(AuthorityName, StakeUnit)],
@@ -262,7 +237,33 @@ impl Committee {
     }
 
     // ===== Testing-only methods =====
-    //
+
+    /// Normalize the given weights to TOTAL_VOTING_POWER and create the committee.
+    /// Used for testing only: a production system is using the voting weights
+    /// of the Sui System object.
+    pub fn new_for_testing_with_normalized_voting_power(
+        epoch: EpochId,
+        mut voting_weights: BTreeMap<AuthorityName, StakeUnit>,
+    ) -> Self {
+        let num_nodes = voting_weights.len();
+        let total_votes: StakeUnit = voting_weights.iter().map(|(_, votes)| *votes).sum();
+
+        let normalization_coef = TOTAL_VOTING_POWER as f64 / total_votes as f64;
+        let mut total_sum = 0;
+        for (idx, (_auth, weight)) in voting_weights.iter_mut().enumerate() {
+            if idx < num_nodes - 1 {
+                *weight = (*weight as f64 * normalization_coef).floor() as u64; // adjust the weights following the normalization coef
+                total_sum += *weight;
+            } else {
+                // the last element is taking all the rest
+                *weight = TOTAL_VOTING_POWER - total_sum;
+            }
+        }
+
+        Self::new(epoch, voting_weights)
+    }
+
+    /// Generate a simple committee with `size` validators each with equal voting stake of 1.
     pub fn new_simple_test_committee_of_size(size: usize) -> (Self, Vec<AuthorityKeyPair>) {
         let key_pairs: Vec<_> = random_committee_key_pairs_of_size(size)
             .into_iter()

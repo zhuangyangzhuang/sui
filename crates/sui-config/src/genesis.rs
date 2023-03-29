@@ -767,14 +767,14 @@ impl Builder {
         let committee = Self::committee(&objects);
 
         let checkpoint = {
-            let signatures = self
+            let signatures: Vec<_> = self
                 .signatures
                 .clone()
                 .into_iter()
                 .map(|(_, s)| s)
                 .collect();
 
-            CertifiedCheckpointSummary::new(checkpoint, signatures, &committee).unwrap()
+            CertifiedCheckpointSummary::new(checkpoint, &signatures, &committee).unwrap()
         };
 
         let genesis = Genesis {

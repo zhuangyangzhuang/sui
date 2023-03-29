@@ -116,5 +116,5 @@ pub fn mock_certified_checkpoint<'a>(
         })
         .collect();
 
-    CertifiedCheckpointSummary::new(summary, sign_infos, &committee).expect("Cert is OK")
+    CertifiedCheckpointSummary::new(summary, &sign_infos, &committee).expect("Cert is OK")
 }

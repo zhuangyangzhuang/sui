@@ -7,8 +7,7 @@ use crate::certificate_proof::CertificateProof;
 use crate::committee::{EpochId, ProtocolVersion};
 use crate::crypto::{
     default_hash, AuthoritySignInfo, AuthoritySignature, AuthorityStrongQuorumSignInfo,
-    DefaultHash, Ed25519SuiSignature, EmptySignInfo, Signature, Signer, SuiSignatureInner,
-    ToFromBytes,
+    DefaultHash, Ed25519SuiSignature, EmptySignInfo, Signature, Signer,
 };
 use crate::digests::{CertificateDigest, SenderSignedDataDigest, TransactionEventsDigest};
 use crate::gas::GasCostSummary;
@@ -965,7 +964,7 @@ pub struct GasData {
     pub budget: u64,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub enum TransactionExpiration {
     /// The transaction has no expiration
     None,
@@ -1157,31 +1156,6 @@ impl TransactionData {
         ))
     }
 
-    pub fn new_move_call_with_gas_coins(
-        sender: SuiAddress,
-        package: ObjectID,
-        module: Identifier,
-        function: Identifier,
-        type_arguments: Vec<TypeTag>,
-        gas_payment: Vec<ObjectRef>,
-        arguments: Vec<CallArg>,
-        gas_budget: u64,
-        gas_price: u64,
-    ) -> anyhow::Result<Self> {
-        let pt = {
-            let mut builder = ProgrammableTransactionBuilder::new();
-            builder.move_call(package, module, function, type_arguments, arguments)?;
-            builder.finish()
-        };
-        Ok(Self::new_programmable(
-            sender,
-            gas_payment,
-            pt,
-            gas_budget,
-            gas_price,
-        ))
-    }
-
     pub fn new_transfer_with_dummy_gas_price(
         recipient: SuiAddress,
         object_ref: ObjectRef,
@@ -1209,6 +1183,7 @@ impl TransactionData {
     ) -> Self {
         let pt = {
             let mut builder = ProgrammableTransactionBuilder::new();
+            // is unwrap safe here?
             builder.transfer_object(recipient, object_ref).unwrap();
             builder.finish()
         };
@@ -1248,25 +1223,8 @@ impl TransactionData {
         Self::new_programmable(sender, vec![gas_payment], pt, gas_budget, gas_price)
     }
 
-    pub fn new_pay_with_dummy_gas_price(
-        sender: SuiAddress,
-        coins: Vec<ObjectRef>,
-        recipients: Vec<SuiAddress>,
-        amounts: Vec<u64>,
-        gas_payment: ObjectRef,
-        gas_budget: u64,
-    ) -> anyhow::Result<Self> {
-        Self::new_pay(
-            sender,
-            coins,
-            recipients,
-            amounts,
-            gas_payment,
-            gas_budget,
-            DUMMY_GAS_PRICE,
-        )
-    }
-
+    // Why is new_pay/new_pay_sui returning a Result<Self> but other functions return Self?
+    // Which convention should we use?
     pub fn new_pay(
         sender: SuiAddress,
         coins: Vec<ObjectRef>,
@@ -1482,9 +1440,6 @@ pub trait TransactionDataAPI {
     // shared across versions. This will be easy to do since it is already an enum.
     fn kind(&self) -> &TransactionKind;
 
-    // Used by programmable_transaction_builder
-    fn kind_mut(&mut self) -> &mut TransactionKind;
-
     // kind is moved out of often enough that this is worth it to special case.
     fn into_kind(self) -> TransactionKind;
 
@@ -1531,7 +1486,7 @@ pub trait TransactionDataAPI {
     #[cfg(test)]
     fn gas_data_mut(&mut self) -> &mut GasData;
 
-    // This should be used in testing only.
+    #[cfg(feature = "test-utils")]
     fn expiration_mut_for_testing(&mut self) -> &mut TransactionExpiration;
 }
 
@@ -1542,10 +1497,6 @@ impl TransactionDataAPI for TransactionDataV1 {
 
     fn kind(&self) -> &TransactionKind {
         &self.kind
-    }
-
-    fn kind_mut(&mut self) -> &mut TransactionKind {
-        &mut self.kind
     }
 
     fn into_kind(self) -> TransactionKind {
@@ -1674,6 +1625,7 @@ impl TransactionDataAPI for TransactionDataV1 {
         &mut self.gas_data
     }
 
+    #[cfg(feature = "test-utils")]
     fn expiration_mut_for_testing(&mut self) -> &mut TransactionExpiration {
         &mut self.expiration
     }
@@ -1724,18 +1676,13 @@ impl SenderSignedData {
             .expect("SenderSignedData must contain exactly one transaction")
     }
 
+    /// Testing only.
     pub fn inner_mut(&mut self) -> &mut SenderSignedTransaction {
         // assert is safe - SenderSignedTransaction::verify ensures length is 1.
         assert_eq!(self.0.len(), 1);
         self.0
             .get_mut(0)
             .expect("SenderSignedData must contain exactly one transaction")
-    }
-
-    // This function does not check validity of the signature
-    // or perform any de-dup checks.
-    pub fn add_signature(&mut self, new_signature: Signature) {
-        self.inner_mut().tx_signatures.push(new_signature.into());
     }
 
     fn get_signer_sig_mapping(&self) -> SuiResult<BTreeMap<SuiAddress, &GenericSignature>> {
@@ -1764,7 +1711,7 @@ impl SenderSignedData {
         &mut self.inner_mut().intent_message
     }
 
-    // used cross-crate, so cannot be #[cfg(test)]
+    #[cfg(feature = "test-utils")]
     pub fn tx_signatures_mut_for_testing(&mut self) -> &mut Vec<GenericSignature> {
         &mut self.inner_mut().tx_signatures
     }
@@ -1904,15 +1851,6 @@ impl Transaction {
         )
     }
 
-    pub fn signature_from_signer(
-        data: TransactionData,
-        intent: Intent,
-        signer: &dyn Signer<Signature>,
-    ) -> Signature {
-        let intent_msg = IntentMessage::new(intent, data);
-        Signature::new_secure(&intent_msg, signer)
-    }
-
     pub fn from_generic_sig_data(
         data: TransactionData,
         intent: Intent,
@@ -1925,6 +1863,7 @@ impl Transaction {
     /// and a list of Base64 encoded [enum GenericSignature].
     pub fn to_tx_bytes_and_signatures(&self) -> (Base64, Vec<Base64>) {
         (
+            // Unwrap is safe here because [struct TransactionData] is BCS Serializable.
             Base64::from_bytes(&bcs::to_bytes(&self.data().intent_message().value).unwrap()),
             self.data()
                 .inner()
@@ -1988,13 +1927,11 @@ impl VerifiedTransaction {
                 SenderSignedData::new_from_sender_signature(
                     data,
                     Intent::sui_transaction(),
-                    Ed25519SuiSignature::from_bytes(&[0; Ed25519SuiSignature::LENGTH])
-                        .unwrap()
-                        .into(),
+                    Ed25519SuiSignature::default().into(),
                 )
             })
             .pipe(Transaction::new)
-            .pipe(Self::new_from_verified)
+            .pipe(Self::new_unchecked)
     }
 }
 
@@ -2006,7 +1943,7 @@ impl VerifiedSignedTransaction {
         authority: AuthorityName,
         secret: &dyn Signer<AuthoritySignature>,
     ) -> Self {
-        Self::new_from_verified(SignedTransaction::new(
+        Self::new_unchecked(SignedTransaction::new(
             epoch,
             transaction.into_inner().into_data(),
             secret,
@@ -2085,18 +2022,6 @@ pub struct ObjectInfoRequest {
 }
 
 impl ObjectInfoRequest {
-    pub fn past_object_info_debug_request(
-        object_id: ObjectID,
-        version: SequenceNumber,
-        layout: Option<ObjectFormatOptions>,
-    ) -> Self {
-        ObjectInfoRequest {
-            object_id,
-            object_format_options: layout,
-            request_kind: ObjectInfoRequestKind::PastObjectInfoDebug(version),
-        }
-    }
-
     pub fn latest_object_info_request(
         object_id: ObjectID,
         layout: Option<ObjectFormatOptions>,
@@ -2153,6 +2078,7 @@ pub enum TransactionStatus {
 }
 
 impl TransactionStatus {
+    #[cfg(feature = "test-utils")]
     pub fn into_signed_for_testing(self) -> AuthoritySignInfo {
         match self {
             Self::Signed(s) => s,
@@ -2160,6 +2086,7 @@ impl TransactionStatus {
         }
     }
 
+    #[cfg(feature = "test-utils")]
     pub fn into_effects_for_testing(self) -> SignedTransactionEffects {
         match self {
             Self::Executed(_, e, _) => e,
@@ -2543,10 +2470,12 @@ impl ExecutionStatus {
         matches!(self, ExecutionStatus::Success { .. })
     }
 
+    #[cfg(feature = "test-utils")]
     pub fn is_err(&self) -> bool {
         matches!(self, ExecutionStatus::Failure { .. })
     }
 
+    #[cfg(feature = "test-utils")]
     pub fn unwrap(&self) {
         match self {
             ExecutionStatus::Success => {}
@@ -2556,6 +2485,7 @@ impl ExecutionStatus {
         }
     }
 
+    #[cfg(feature = "test-utils")]
     pub fn unwrap_err(self) -> (ExecutionFailureStatus, Option<CommandIndex>) {
         match self {
             ExecutionStatus::Success { .. } => {
@@ -2729,10 +2659,10 @@ impl TransactionEffects {
     }
 }
 
-// testing helpers.
 impl TransactionEffects {
-    pub fn new_with_tx(tx: &Transaction) -> TransactionEffects {
-        Self::new_with_tx_and_gas(
+    #[cfg(feature = "test-utils")]
+    pub fn new_with_tx_for_testing(tx: &Transaction) -> TransactionEffects {
+        Self::new_with_tx_and_gas_for_testing(
             tx,
             (
                 random_object_ref(),
@@ -2741,7 +2671,11 @@ impl TransactionEffects {
         )
     }
 
-    pub fn new_with_tx_and_gas(tx: &Transaction, gas_object: (ObjectRef, Owner)) -> Self {
+    #[cfg(feature = "test-utils")]
+    pub fn new_with_tx_and_gas_for_testing(
+        tx: &Transaction,
+        gas_object: (ObjectRef, Owner),
+    ) -> Self {
         TransactionEffects::V1(TransactionEffectsV1 {
             transaction_digest: *tx.digest(),
             gas_object,
@@ -2782,11 +2716,15 @@ pub trait TransactionEffectsAPI {
 
     // All of these should be #[cfg(test)], but they are used by tests in other crates, and
     // dependencies don't get built with cfg(test) set as far as I can tell.
-    fn status_mut_for_testing(&mut self) -> &mut ExecutionStatus;
+    #[cfg(feature = "test-utils")]
     fn gas_cost_summary_mut_for_testing(&mut self) -> &mut GasCostSummary;
+    #[cfg(feature = "test-utils")]
     fn transaction_digest_mut_for_testing(&mut self) -> &mut TransactionDigest;
+    #[cfg(feature = "test-utils")]
     fn dependencies_mut_for_testing(&mut self) -> &mut Vec<TransactionDigest>;
+    #[cfg(feature = "test-utils")]
     fn shared_objects_mut_for_testing(&mut self) -> &mut Vec<ObjectRef>;
+    #[cfg(feature = "test-utils")]
     fn modified_at_versions_mut_for_testing(&mut self) -> &mut Vec<(ObjectID, SequenceNumber)>;
 }
 
@@ -2899,21 +2837,27 @@ impl TransactionEffectsAPI for TransactionEffectsV1 {
         }
     }
 
-    fn status_mut_for_testing(&mut self) -> &mut ExecutionStatus {
-        &mut self.status
-    }
+    #[cfg(feature = "test-utils")]
     fn gas_cost_summary_mut_for_testing(&mut self) -> &mut GasCostSummary {
         &mut self.gas_used
     }
+
+    #[cfg(feature = "test-utils")]
     fn transaction_digest_mut_for_testing(&mut self) -> &mut TransactionDigest {
         &mut self.transaction_digest
     }
+
+    #[cfg(feature = "test-utils")]
     fn dependencies_mut_for_testing(&mut self) -> &mut Vec<TransactionDigest> {
         &mut self.dependencies
     }
+
+    #[cfg(feature = "test-utils")]
     fn shared_objects_mut_for_testing(&mut self) -> &mut Vec<ObjectRef> {
         &mut self.shared_objects
     }
+
+    #[cfg(feature = "test-utils")]
     fn modified_at_versions_mut_for_testing(&mut self) -> &mut Vec<(ObjectID, SequenceNumber)> {
         &mut self.modified_at_versions
     }
@@ -3099,14 +3043,6 @@ pub struct InputObjects {
 impl InputObjects {
     pub fn new(objects: Vec<(InputObjectKind, Object)>) -> Self {
         Self { objects }
-    }
-
-    pub fn len(&self) -> usize {
-        self.objects.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.objects.is_empty()
     }
 
     pub fn filter_owned_objects(&self) -> Vec<ObjectRef> {
@@ -3480,18 +3416,13 @@ pub enum ExecuteTransactionResponse {
     ),
 }
 
-#[derive(Clone, Debug)]
-pub struct QuorumDriverRequest {
-    pub transaction: VerifiedTransaction,
-}
-
 #[derive(Debug, Clone)]
 pub struct QuorumDriverResponse {
     pub effects_cert: VerifiedCertifiedTransactionEffects,
     pub events: TransactionEvents,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct SystemStateRequest {
     // This is needed to make gRPC happy.
     pub _unused: bool,

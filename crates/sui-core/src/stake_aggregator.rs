@@ -117,10 +117,11 @@ impl<const STRENGTH: bool> StakeAggregator<AuthoritySignInfo, STRENGTH> {
                 },
             };
         }
+        let sigs: Vec<AuthoritySignInfo> = self.data.iter().map(|(_, v)| v.clone()).collect();
         match self.insert_generic(sig.authority, sig) {
             InsertResult::QuorumReached(_) => {
                 match AuthorityQuorumSignInfo::<STRENGTH>::new_from_auth_sign_infos(
-                    self.data.values().cloned().collect(),
+                    &sigs,
                     self.committee(),
                 ) {
                     Ok(aggregated) => {
