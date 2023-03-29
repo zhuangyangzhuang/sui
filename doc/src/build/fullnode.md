@@ -96,9 +96,9 @@ To get a Full node with indexer running in Docker, follow the instructions in th
 You must get the latest source files from the Sui GitHub repository.
 
 1. Set up your fork of the Sui repository:
-     1. Go to the [Sui repository](https://github.com/MystenLabs/sui) on GitHub
+   1. Go to the [Sui repository](https://github.com/MystenLabs/sui) on GitHub
        and click the *Fork* button in the top right-hand corner of the screen.
-     1. Clone your personal fork of the Sui repository to your local machine
+   1. Clone your personal fork of the Sui repository to your local machine
        (ensure that you insert your GitHub username into the URL):
        ```shell
        git clone https://github.com/<YOUR-GITHUB-USERNAME>/sui.git
@@ -126,28 +126,28 @@ Open a Terminal or Console to the `sui` directory you downloaded in the previous
 
  1. Install the required [Prerequisites](../build/install.md#prerequisites).
  1. Make a copy of the [Full node YAML template](https://github.com/MystenLabs/sui/blob/main/crates/sui-config/data/fullnode-template.yaml):
-   ```shell
-   cp crates/sui-config/data/fullnode-template.yaml fullnode.yaml
-   ```
+      ```shell
+      cp crates/sui-config/data/fullnode-template.yaml fullnode.yaml
+      ```
  1. Download the genesis blob for the network to use:
      * [Devnet genesis blob](https://github.com/MystenLabs/sui-genesis/raw/main/devnet/genesis.blob):
-    ```shell
-    curl -fLJO https://github.com/MystenLabs/sui-genesis/raw/main/devnet/genesis.blob
-    ```
+         ```shell
+         curl -fLJO https://github.com/MystenLabs/sui-genesis/raw/main/devnet/genesis.blob
+         ```
      * [Testnet genesis blob](https://github.com/MystenLabs/sui-genesis/raw/main/testnet/genesis.blob) - Supported only when there is an active public Testnet network.
-    ```shell
-    curl -fLJO https://github.com/MystenLabs/sui-genesis/raw/main/testnet/genesis.blob
-    ```
+         ```shell
+         curl -fLJO https://github.com/MystenLabs/sui-genesis/raw/main/testnet/genesis.blob
+         ```
  1. Optional: Skip this step to accept the default paths to resources. Edit the `fullnode.yaml` file to use custom paths.
-     * Update the `db-path` field with the path to the Full node database.
-       ```yaml
-       db-path: "/db-files/sui-fullnode"
-       ```
-     * Update the `genesis-file-location` with the path to `genesis.blob`.
-       ```yaml
-       genesis:
-       genesis-file-location: "/sui-fullnode/genesis.blob"
-       ```
+   * Update the `db-path` field with the path to the Full node database.
+      ```yaml
+      db-path: "/db-files/sui-fullnode"
+      ```
+   * Update the `genesis-file-location` with the path to `genesis.blob`.
+      ```yaml
+      genesis:
+         genesis-file-location: "/sui-fullnode/genesis.blob"
+      ```
  
 After completing these steps, continue with setting up your indexer before starting the Full node.
 
@@ -163,13 +163,13 @@ With Postgres and Diesel CLI installed, follow these steps to set up the indexer
  1. Create a Postgres database to use for the indexer. 
  1. Open a Terminal or Console to the `sui/crates/sui-indexer` directory. 
  1. Pass your database connection URL to the `diesel setup` command. The connection URL is in the form of `postgres://<POSTGRES-USER>/<POSTGRES-USER-PASSWORD>@localhost/<DATABASE-NAME>`. 
-   ```sh
-   diesel setup --database-url="<DATABASE-URL>"
-   ```
+    ```sh
+    diesel setup --database-url="<DATABASE-URL>"
+    ```
  1. Run the Diesel migration with the following command:
-   ```sh
-   diesel migration run --database-url="<DATABASE-URL>"
-   ```
+    ```sh
+    diesel migration run --database-url="<DATABASE-URL>"
+    ```
 
 Refer to the `sui-indexer` module [Readme file](https://github.com/MystenLabs/sui/blob/main/crates/sui-indexer/README.md) for additional information and troubleshooting.
 
@@ -259,14 +259,14 @@ If you followed the instructions for [Building from Source](#building-from-sourc
     git checkout -B <BRANCH-NAME> --track upstream/<BRANCH-NAME>
     ```
  1. Download the latest genesis blob:
-     * [Devnet genesis blob](https://github.com/MystenLabs/sui-genesis/raw/main/devnet/genesis.blob):
-    ```shell
-    curl -fLJO https://github.com/MystenLabs/sui-genesis/raw/main/devnet/genesis.blob
-    ```
+    * [Devnet genesis blob](https://github.com/MystenLabs/sui-genesis/raw/main/devnet/genesis.blob):
+      ```shell
+      curl -fLJO https://github.com/MystenLabs/sui-genesis/raw/main/devnet/genesis.blob
+      ```
     * [Testnet genesis blob](https://github.com/MystenLabs/sui-genesis/raw/main/testnet/genesis.blob) - supported only when there is an active public Testnet network
-    ```shell
-    curl -fLJO https://github.com/MystenLabs/sui-genesis/raw/main/testnet/genesis.blob
-    ```
+      ```shell
+      curl -fLJO https://github.com/MystenLabs/sui-genesis/raw/main/testnet/genesis.blob
+      ```
  1. Update your `fullnode.yaml` configuration file if needed.
  1. Restart your Sui Full node:
     ```shell
