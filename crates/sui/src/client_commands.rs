@@ -37,8 +37,8 @@ use sui_framework_build::compiled_package::{
 };
 use sui_json::SuiJsonValue;
 use sui_json_rpc_types::{
-    DynamicFieldPage, SuiData, SuiObjectData, SuiObjectResponse, SuiObjectResponseQuery,
-    SuiRawData, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
+    DynamicFieldPage, SuiData, SuiObjectData, SuiObjectDataFilter, SuiObjectResponse,
+    SuiObjectResponseQuery, SuiRawData, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
     SuiTransactionBlockResponseOptions,
 };
 use sui_json_rpc_types::{SuiExecutionStatus, SuiObjectDataOptions};
@@ -1263,32 +1263,46 @@ impl WalletContext {
         address: SuiAddress,
     ) -> Result<Vec<(u64, SuiObjectData)>, anyhow::Error> {
         let client = self.get_client().await?;
-        let objects = client
+
+        let mut objects: Vec<SuiObjectResponse> = Vec::new();
+        let mut has_next_page = true;
+        let mut response = client
             .read_api()
             .get_owned_objects(
                 address,
-                Some(SuiObjectResponseQuery::new_with_options(
-                    SuiObjectDataOptions::full_content(),
+                Some(SuiObjectResponseQuery::new(
+                    Some(SuiObjectDataFilter::StructType(GasCoin::type_())),
+                    Some(SuiObjectDataOptions::full_content()),
                 )),
                 None,
                 None,
             )
-            .await?
-            .data;
+            .await?;
+
+        while has_next_page {
+            objects.extend(response.data.clone());
+            if response.has_next_page {
+                response = client
+                    .read_api()
+                    .get_owned_objects(
+                        address,
+                        Some(SuiObjectResponseQuery::new(
+                            Some(SuiObjectDataFilter::StructType(GasCoin::type_())),
+                            Some(SuiObjectDataOptions::full_content()),
+                        )),
+                        response.next_cursor,
+                        None,
+                    )
+                    .await?
+            } else {
+                has_next_page = false;
+            }
+        }
+
         // TODO: We should ideally fetch the objects from local cache
         let mut values_objects = Vec::new();
 
-        let oref_ids = objects
-            .into_iter()
-            .map(|o| o.object().unwrap().object_id)
-            .collect();
-
-        let responses = client
-            .read_api()
-            .multi_get_object_with_options(oref_ids, SuiObjectDataOptions::full_content())
-            .await?;
-
-        for object in responses {
+        for object in objects {
             let o = object.data;
             if let Some(o) = o {
                 if matches!( &o.type_, Some(type_)  if type_.is_gas_coin()) {
