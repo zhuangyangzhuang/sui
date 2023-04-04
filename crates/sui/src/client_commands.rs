@@ -25,10 +25,15 @@ use prettytable::Table;
 use prettytable::{row, table};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sui_adapter::execution_engine::execute_transaction_to_effects;
 use sui_framework::build_move_package;
 use sui_move::build::resolve_lock_file_path;
 use sui_source_validation::{BytecodeSourceVerifier, SourceMode};
-use sui_types::error::SuiError;
+use sui_types::base_types::TxContext;
+use sui_types::committee::EpochId;
+use sui_types::digests::TransactionDigest;
+use sui_types::epoch_data::EpochData;
+use sui_types::error::{SuiError, MoveVM};
 
 use shared_crypto::intent::Intent;
 use sui_framework_build::compiled_package::{
@@ -39,13 +44,15 @@ use sui_json::SuiJsonValue;
 use sui_json_rpc_types::{
     DynamicFieldPage, SuiData, SuiObjectData, SuiObjectDataFilter, SuiObjectResponse,
     SuiObjectResponseQuery, SuiRawData, SuiTransactionBlockEffectsAPI, SuiTransactionBlockResponse,
-    SuiTransactionBlockResponseOptions,
+    SuiTransactionBlockResponseOptions, SuiTransactionBlockData, SuiTransactionBlockKind, SuiTransactionBlockEffects, CheckpointId, BigInt,
 };
 use sui_json_rpc_types::{SuiExecutionStatus, SuiObjectDataOptions};
 use sui_keys::keystore::AccountKeystore;
 use sui_sdk::SuiClient;
 use sui_types::crypto::SignatureScheme;
 use sui_types::dynamic_field::DynamicFieldType;
+use sui_types::messages::{SenderSignedData, TransactionData};
+use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use sui_types::move_package::UpgradeCap;
 use sui_types::signature::GenericSignature;
 use sui_types::{
@@ -468,6 +475,12 @@ pub enum SuiClientCommands {
         #[clap(long)]
         signatures: Vec<String>,
     },
+
+    ReexececuteLocally {
+        /// The transaction digest to execute
+        #[clap(long)]
+        transaction_digest: TransactionDigest,
+    }
 }
 
 impl SuiClientCommands {
@@ -476,6 +489,59 @@ impl SuiClientCommands {
         context: &mut WalletContext,
     ) -> Result<SuiClientCommandResult, anyhow::Error> {
         let ret = Ok(match self {
+            SuiClientCommands::ReexececuteLocally { transaction_digest } => {
+                let client = context.get_client().await?;
+                let read_api = client.read_api();
+                let transaction = read_api.get_transaction_with_options(
+                    transaction_digest,
+                    SuiTransactionBlockResponseOptions::full_content()
+                ).await?;
+
+                let signed: SenderSignedData = bcs::from_bytes(&transaction.raw_transaction).unwrap();
+                let TransactionData::V1(txn_data) = &signed.intent_message().value;
+                let pt = match &txn_data.kind {
+                    sui_types::messages::TransactionKind::ProgrammableTransaction(pt) => pt,
+                    _ => {
+                        panic!("Not supported yet");
+                    }
+                };
+                let SuiTransactionBlockEffects::V1(effects) = &transaction.effects.unwrap();
+                let epoch_data = {
+                    let checkpoint_id = transaction.checkpoint.unwrap();
+                    let checkpoint_seqno = BigInt::from(checkpoint_id);
+                    let checkpoint_id_checkpoint = CheckpointId::SequenceNumber(checkpoint_seqno);
+                    let checkpoint = read_api.get_checkpoint(checkpoint_id_checkpoint).await?;
+                    EpochData::new(
+                        checkpoint.epoch,
+                        checkpoint.timestamp_ms, // <- Is this correct?
+                        checkpoint.digest
+                        )
+                };
+                // let executed_epoch = effects.executed_epoch().into() as u64;
+                // let tx_context = TxContext::new(
+                //     &txn_data.sender,
+                //     &transaction_digest,
+                //     EpochData::new(executed_epoch, epoch_start_timestamp, epoch_digest)
+                //     EpochId(executed_epoch),
+                // );
+                // execute_transaction_to_effects(
+                //     shared_object_refs,
+                //     temporary_store,
+                //     transaction_kind,
+                //     transaction_signer,
+                //     gas,
+                //     transaction_digest,
+                //     transaction_dependencies,
+                //     move_vm,
+                //     gas_status,
+                //     epoch_data,
+                //     protocol_config
+                //     ;)
+                // MoveVM::new(natives)
+                // let storage_view = std::todo!();
+
+                std::todo!()
+            }
             SuiClientCommands::Upgrade {
                 package_path,
                 upgrade_capability,
