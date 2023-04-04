@@ -33,10 +33,7 @@ use sui_types::object::{
 use sui_types::parse_sui_struct_tag;
 use sui_types::sui_system_state::SUI_SYSTEM_MODULE_NAME;
 use sui_types::utils::to_sender_signed_transaction;
-use sui_types::{
-    SUI_FRAMEWORK_OBJECT_ID, SUI_SYSTEM_PACKAGE_ID, SUI_SYSTEM_STATE_OBJECT_ID,
-    SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-};
+use sui_types::{SUI_FRAMEWORK_OBJECT_ID, SUI_SYSTEM_PACKAGE_ID};
 
 /// The maximum gas per transaction.
 pub const MAX_GAS: u64 = 5_000_000_000;
@@ -451,11 +448,7 @@ pub fn make_staking_transaction(
         vec![],
         gas_object,
         vec![
-            CallArg::Object(ObjectArg::SharedObject {
-                id: SUI_SYSTEM_STATE_OBJECT_ID,
-                initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-                mutable: true,
-            }),
+            CallArg::SUI_SYSTEM_OBJ_CALL_ARG,
             CallArg::Object(ObjectArg::ImmOrOwnedObject(coin)),
             CallArg::Pure(bcs::to_bytes(&validator).unwrap()),
         ],

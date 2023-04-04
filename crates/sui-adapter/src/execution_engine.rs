@@ -26,8 +26,7 @@ use sui_types::epoch_data::EpochData;
 use sui_types::error::{ExecutionError, ExecutionErrorKind};
 use sui_types::gas::{GasCostSummary, SuiGasStatusAPI};
 use sui_types::messages::{
-    Argument, ConsensusCommitPrologue, GenesisTransaction, ObjectArg, ProgrammableTransaction,
-    TransactionKind,
+    Argument, ConsensusCommitPrologue, GenesisTransaction, ProgrammableTransaction, TransactionKind,
 };
 use sui_types::storage::{ChildObjectResolver, ObjectStore, ParentSync, WriteKind};
 use sui_types::sui_system_state::ADVANCE_EPOCH_SAFE_MODE_FUNCTION_NAME;
@@ -39,12 +38,9 @@ use sui_types::{
     object::Object,
     storage::BackingPackageStore,
     sui_system_state::{ADVANCE_EPOCH_FUNCTION_NAME, SUI_SYSTEM_MODULE_NAME},
-    SUI_FRAMEWORK_ADDRESS, SUI_SYSTEM_STATE_OBJECT_ID,
+    SUI_FRAMEWORK_ADDRESS,
 };
-use sui_types::{
-    is_system_package, SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION,
-    SUI_FRAMEWORK_OBJECT_ID, SUI_SYSTEM_PACKAGE_ID, SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-};
+use sui_types::{is_system_package, SUI_FRAMEWORK_OBJECT_ID, SUI_SYSTEM_PACKAGE_ID};
 
 use sui_types::temporary_store::TemporaryStore;
 
@@ -438,13 +434,8 @@ pub fn construct_advance_epoch_pt(
 
     // Step 2: Advance the epoch.
     let mut arguments = vec![storage_rewards, computation_rewards];
-    let system_object_arg = CallArg::Object(ObjectArg::SharedObject {
-        id: SUI_SYSTEM_STATE_OBJECT_ID,
-        initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-        mutable: true,
-    });
     let call_arg_arguments = vec![
-        system_object_arg,
+        CallArg::SUI_SYSTEM_OBJ_CALL_ARG,
         CallArg::Pure(bcs::to_bytes(&params.epoch).unwrap()),
         CallArg::Pure(bcs::to_bytes(&params.next_protocol_version.as_u64()).unwrap()),
         CallArg::Pure(bcs::to_bytes(&params.storage_rebate).unwrap()),
@@ -498,14 +489,9 @@ pub fn construct_advance_epoch_safe_mode_pt(
 
     // Step 2: Advance the epoch.
     let mut arguments = vec![storage_rewards, computation_rewards];
-    let system_object_arg = CallArg::Object(ObjectArg::SharedObject {
-        id: SUI_SYSTEM_STATE_OBJECT_ID,
-        initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-        mutable: true,
-    });
 
     let mut args = vec![
-        system_object_arg,
+        CallArg::SUI_SYSTEM_OBJ_CALL_ARG,
         CallArg::Pure(bcs::to_bytes(&params.epoch).unwrap()),
         CallArg::Pure(bcs::to_bytes(&params.next_protocol_version.as_u64()).unwrap()),
         CallArg::Pure(bcs::to_bytes(&params.storage_rebate).unwrap()),
@@ -653,11 +639,7 @@ fn setup_consensus_commit<S: BackingPackageStore + ParentSync + ChildObjectResol
             CONSENSUS_COMMIT_PROLOGUE_FUNCTION_NAME.to_owned(),
             vec![],
             vec![
-                CallArg::Object(ObjectArg::SharedObject {
-                    id: SUI_CLOCK_OBJECT_ID,
-                    initial_shared_version: SUI_CLOCK_OBJECT_SHARED_VERSION,
-                    mutable: true,
-                }),
+                CallArg::sui_clock_obj_call_arg(true),
                 CallArg::Pure(bcs::to_bytes(&prologue.commit_timestamp_ms).unwrap()),
             ],
         );

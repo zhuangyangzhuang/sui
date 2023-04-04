@@ -54,9 +54,8 @@ use sui_types::{
     crypto::{AccountKeyPair, AuthorityKeyPair, KeypairTraits},
     messages::VerifiedTransaction,
     object::{Owner, GAS_VALUE_FOR_TESTING, OBJECT_START_VERSION},
-    SUI_SYSTEM_STATE_OBJECT_ID,
+    SUI_CLOCK_OBJECT_ID, SUI_SYSTEM_STATE_OBJECT_ID,
 };
-use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 
 use crate::authority::move_integration_tests::build_and_publish_test_package_with_upgrade_cap;
 use crate::consensus_handler::SequencedConsensusTransaction;
@@ -3136,11 +3135,7 @@ async fn test_invalid_mutable_clock_parameter() {
         ident_str!("use_clock").to_owned(),
         /* type_args */ vec![],
         gas_ref,
-        vec![CallArg::Object(ObjectArg::SharedObject {
-            id: SUI_CLOCK_OBJECT_ID,
-            initial_shared_version: SUI_CLOCK_OBJECT_SHARED_VERSION,
-            mutable: true,
-        })],
+        vec![CallArg::sui_clock_obj_call_arg(true)],
         MAX_GAS,
     )
     .unwrap();
@@ -3177,11 +3172,7 @@ async fn test_valid_immutable_clock_parameter() {
         ident_str!("use_clock").to_owned(),
         /* type_args */ vec![],
         gas_ref,
-        vec![CallArg::Object(ObjectArg::SharedObject {
-            id: SUI_CLOCK_OBJECT_ID,
-            initial_shared_version: SUI_CLOCK_OBJECT_SHARED_VERSION,
-            mutable: false,
-        })],
+        vec![CallArg::sui_clock_obj_call_arg(false)],
         MAX_GAS,
     )
     .unwrap();

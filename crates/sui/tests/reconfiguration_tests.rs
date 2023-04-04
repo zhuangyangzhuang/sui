@@ -39,7 +39,6 @@ use sui_types::sui_system_state::{
     SuiSystemStateTrait,
 };
 use sui_types::utils::to_sender_signed_transaction;
-use sui_types::{SUI_SYSTEM_STATE_OBJECT_ID, SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION};
 use test_utils::authority::start_node;
 use test_utils::{
     authority::{
@@ -612,11 +611,7 @@ async fn test_inactive_validator_pool_read() {
         ident_str!("request_remove_validator").to_owned(),
         vec![],
         gas_objects[0].compute_object_reference(),
-        vec![CallArg::Object(ObjectArg::SharedObject {
-            id: SUI_SYSTEM_STATE_OBJECT_ID,
-            initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-            mutable: true,
-        })],
+        vec![CallArg::SUI_SYSTEM_OBJ_CALL_ARG],
         GAS_BUDGET,
     )
     .unwrap();
@@ -1076,11 +1071,7 @@ async fn execute_add_validator_candidate_tx(
         vec![],
         gas_object,
         vec![
-            CallArg::Object(ObjectArg::SharedObject {
-                id: SUI_SYSTEM_STATE_OBJECT_ID,
-                initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-                mutable: true,
-            }),
+            CallArg::SUI_SYSTEM_OBJ_CALL_ARG,
             CallArg::Pure(bcs::to_bytes(val.protocol_pubkey.as_bytes()).unwrap()),
             CallArg::Pure(bcs::to_bytes(val.network_pubkey.as_bytes()).unwrap()),
             CallArg::Pure(bcs::to_bytes(val.worker_pubkey.as_bytes()).unwrap()),
@@ -1134,11 +1125,7 @@ async fn execute_join_committee_txes(
         vec![],
         gas_objects[1],
         vec![
-            CallArg::Object(ObjectArg::SharedObject {
-                id: SUI_SYSTEM_STATE_OBJECT_ID,
-                initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-                mutable: true,
-            }),
+            CallArg::SUI_SYSTEM_OBJ_CALL_ARG,
             CallArg::Object(ObjectArg::ImmOrOwnedObject(stake)),
             CallArg::Pure(bcs::to_bytes(&sender).unwrap()),
         ],
@@ -1161,11 +1148,7 @@ async fn execute_join_committee_txes(
         ident_str!("request_add_validator").to_owned(),
         vec![],
         gas_objects[2],
-        vec![CallArg::Object(ObjectArg::SharedObject {
-            id: SUI_SYSTEM_STATE_OBJECT_ID,
-            initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-            mutable: true,
-        })],
+        vec![CallArg::SUI_SYSTEM_OBJ_CALL_ARG],
         GAS_BUDGET,
     )
     .unwrap();
@@ -1192,11 +1175,7 @@ async fn execute_leave_committee_tx(
         ident_str!("request_remove_validator").to_owned(),
         vec![],
         gas,
-        vec![CallArg::Object(ObjectArg::SharedObject {
-            id: SUI_SYSTEM_STATE_OBJECT_ID,
-            initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
-            mutable: true,
-        })],
+        vec![CallArg::SUI_SYSTEM_OBJ_CALL_ARG],
         GAS_BUDGET,
     )
     .unwrap();

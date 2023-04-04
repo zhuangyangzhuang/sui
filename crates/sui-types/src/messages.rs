@@ -84,6 +84,22 @@ pub enum CallArg {
     Object(ObjectArg),
 }
 
+impl CallArg {
+    pub const SUI_SYSTEM_OBJ_CALL_ARG: Self = Self::Object(ObjectArg::SharedObject {
+        id: SUI_SYSTEM_STATE_OBJECT_ID,
+        initial_shared_version: SUI_SYSTEM_STATE_OBJECT_SHARED_VERSION,
+        mutable: true,
+    });
+
+    pub fn sui_clock_obj_call_arg(mutable: bool) -> Self {
+        Self::Object(ObjectArg::SharedObject {
+            id: SUI_CLOCK_OBJECT_ID,
+            initial_shared_version: SUI_CLOCK_OBJECT_SHARED_VERSION,
+            mutable,
+        })
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize)]
 pub enum ObjectArg {
     // A Move object, either immutable, or owned mutable.

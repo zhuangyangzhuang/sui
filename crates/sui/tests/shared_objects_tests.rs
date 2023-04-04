@@ -21,7 +21,6 @@ use test_utils::{
 use sui_macros::sim_test;
 use sui_types::event::Event;
 use sui_types::object::{generate_test_gas_objects, Object};
-use sui_types::{SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION};
 
 /// Send a simple shared object transaction to Sui and ensures the client gets back a response.
 #[sim_test]
@@ -236,18 +235,12 @@ async fn access_clock_object_test() {
         .await
         .0;
 
-    let clock_object_arg = ObjectArg::SharedObject {
-        id: SUI_CLOCK_OBJECT_ID,
-        initial_shared_version: SUI_CLOCK_OBJECT_SHARED_VERSION,
-        mutable: false,
-    };
-
     let transaction = move_transaction(
         gas_objects.pop().unwrap(),
         "clock",
         "get_time",
         package_id,
-        vec![CallArg::Object(clock_object_arg)],
+        vec![CallArg::sui_clock_obj_call_arg(false)],
     );
     let digest = *transaction.digest();
     let start = SystemTime::now()
