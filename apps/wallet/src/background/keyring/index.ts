@@ -140,6 +140,7 @@ export class Keyring {
             const account = new LedgerAccount({
                 derivationPath: ledgerAccount.derivationPath,
                 address: ledgerAccount.address,
+                publickey: ledgerAccount.publickey,
             });
             this.#accountsMap.set(ledgerAccount.address, account);
         }
@@ -453,6 +454,7 @@ export class Keyring {
                 new LedgerAccount({
                     derivationPath: savedLedgerAccount.derivationPath,
                     address: savedLedgerAccount.address,
+                    publickey: savedLedgerAccount.publickey,
                 })
             );
         }
