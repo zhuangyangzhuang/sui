@@ -1,13 +1,15 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeSet, sync::Arc};
-
 use crate::execution_mode::{self, ExecutionMode};
 use move_binary_format::access::ModuleAccess;
 use move_binary_format::CompiledModule;
 use move_bytecode_utils::module_cache::GetModule;
 use move_vm_runtime::move_vm::MoveVM;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use sui_types::balance::{
     BALANCE_CREATE_REWARDS_FUNCTION_NAME, BALANCE_DESTROY_REBATES_FUNCTION_NAME,
     BALANCE_MODULE_NAME,
@@ -26,7 +28,7 @@ use sui_types::clock::{CLOCK_MODULE_NAME, CONSENSUS_COMMIT_PROLOGUE_FUNCTION_NAM
 use sui_types::committee::EpochId;
 use sui_types::epoch_data::EpochData;
 use sui_types::error::{ExecutionError, ExecutionErrorKind};
-use sui_types::gas::{GasCostSummary, SuiGasStatusAPI};
+use sui_types::gas::{write_gas_stats, GasCostSummary, SuiGasStatusAPI};
 use sui_types::messages::{
     Argument, Command, ConsensusCommitPrologue, GenesisTransaction, ObjectArg,
     ProgrammableTransaction, TransactionKind,
@@ -311,9 +313,10 @@ fn execute_transaction<
         if execution_result.is_ok() {
 
             // This limit is only present in Version 3 and up, so use this to gate it
-            if let (Some(normal_lim), Some(system_lim)) =
-                (protocol_config.max_size_written_objects_as_option(), protocol_config
-            .max_size_written_objects_system_tx_as_option()) {
+            if let (Some(normal_lim), Some(system_lim)) = (
+                protocol_config.max_size_written_objects_as_option(),
+                protocol_config.max_size_written_objects_system_tx_as_option()
+            ) {
                 let written_objects_size = temporary_store.written_objects_size();
 
                 match check_limit_by_meter!(
@@ -371,7 +374,8 @@ fn execute_transaction<
         temporary_store.conserve_unmetered_storage_rebate(gas_status.unmetered_storage_rebate());
         if !is_genesis_tx && !Mode::allow_arbitrary_values() {
             // ensure that this transaction did not create or destroy SUI, try to recover if the check fails
-            let conservation_result = temporary_store.check_sui_conserved(advance_epoch_gas_summary, enable_expensive_checks);
+            let conservation_result = temporary_store
+                .check_sui_conserved(advance_epoch_gas_summary, enable_expensive_checks);
             if let Err(conservation_err) = conservation_result {
                 // conservation violated. try to avoid panic by dumping all writes, charging for gas, re-checking
                 // conservation, and surfacing an aborted transaction with an invariant violation if all of that works
@@ -379,14 +383,21 @@ fn execute_transaction<
                 temporary_store.reset(gas, &mut gas_status);
                 temporary_store.charge_gas(gas_object_id, &mut gas_status, &mut result, gas);
                 // check conservation once more more
-                if let Err(recovery_err) = temporary_store.check_sui_conserved(advance_epoch_gas_summary, enable_expensive_checks) {
+                if let Err(recovery_err) = temporary_store
+                    .check_sui_conserved(advance_epoch_gas_summary, enable_expensive_checks) {
                     // if we still fail, it's a problem with gas
                     // charging that happens even in the "aborted" case--no other option but panic.
                     // we will create or destroy SUI otherwise
-                    panic!("SUI conservation fail in tx block {}: {}\nGas status is {}\nTx was ", tx_ctx.digest(), recovery_err, gas_status.summary())
+                    panic!(
+                        "SUI conservation fail in tx block {}: {}\nGas status is {}\nTx was ",
+                        tx_ctx.digest(),
+                        recovery_err,
+                        gas_status.summary()
+                    )
                 }
               }
-        } // else, we're in the genesis transaction which mints the SUI supply, and hence does not satisfy SUI conservation, or
+        }
+        // else, we're in the genesis transaction which mints the SUI supply, and hence does not satisfy SUI conservation, or
         // we're in the non-production dev inspect mode which allows us to violate conservation
         // === end SUI conservation checks ===
         (cost_summary, result)
@@ -415,6 +426,10 @@ fn execution_loop<
 ) -> Result<Mode::ExecutionResults, ExecutionError> {
     match transaction_kind {
         TransactionKind::ChangeEpoch(change_epoch) => {
+            write_gas_stats(format!(
+                "{}: change_epoch = 1",
+                temporary_store.tx_digest(),
+            ).as_str());
             advance_epoch(
                 change_epoch,
                 temporary_store,
@@ -427,6 +442,7 @@ fn execution_loop<
             Ok(Mode::empty_results())
         }
         TransactionKind::Genesis(GenesisTransaction { objects }) => {
+            write_gas_stats(format!("{}: genesis = 1", temporary_store.tx_digest()).as_str());
             if tx_ctx.epoch() != 0 {
                 panic!("BUG: Genesis Transactions can only be executed in epoch 0");
             }
@@ -447,6 +463,10 @@ fn execution_loop<
             Ok(Mode::empty_results())
         }
         TransactionKind::ConsensusCommitPrologue(prologue) => {
+            write_gas_stats(format!(
+                "{}: consensus_commit_prologue = 1",
+                temporary_store.tx_digest(),
+            ).as_str());
             setup_consensus_commit(
                 prologue,
                 temporary_store,
@@ -459,6 +479,7 @@ fn execution_loop<
             Ok(Mode::empty_results())
         }
         TransactionKind::ProgrammableTransaction(pt) => {
+            track_programmable_transaction(temporary_store.tx_digest(), &pt);
             programmable_transactions::execution::execute::<_, Mode>(
                 protocol_config,
                 metrics,
@@ -473,7 +494,64 @@ fn execution_loop<
     }
 }
 
-fn mint_epoch_rewards_in_pt(
+fn track_programmable_transaction(digest: TransactionDigest, pt: &ProgrammableTransaction) {
+    let mut publishes = 0u64;
+    let mut splits = 0u64;
+    let mut merges = 0u64;
+    let mut make_vecs = 0u64;
+    let mut transfers = 0u64;
+    let mut packages = BTreeMap::new();
+    let mut modules = BTreeMap::new();
+    let mut functions = BTreeMap::new();
+
+    for command in &pt.commands {
+        match command {
+            Command::MoveCall(mc) => {
+                let package = format!("{}", mc.package);
+                let package_count = packages.entry(package.clone()).or_insert(0u64);
+                *package_count += 1;
+                let mut module = package;
+                module.push_str("::");
+                module.push_str(mc.module.as_str());
+                let module_count = modules.entry(module.clone()).or_insert(0u64);
+                *module_count += 1;
+                let mut function = module;
+                function.push_str("::");
+                function.push_str(mc.function.as_str());
+                let function_count = functions.entry(function).or_insert(0u64);
+                *function_count += 1;
+            }
+            Command::TransferObjects(_, _) => transfers += 1,
+            Command::SplitCoins(_, _) => splits += 1,
+            Command::MergeCoins(_, _) => merges += 1,
+            Command::Publish(_, _) => publishes += 1,
+            Command::MakeMoveVec(_, _) => make_vecs += 1,
+            Command::Upgrade(_, _, _, _) => publishes += 1,
+        }
+    }
+
+    let mut pt_info = format!(
+        "{}:  programmable_transaction = 1, publishes = {}, splits = {}, merges = {}, \
+        make_vecs = {}, transfers = {}, ",
+        digest, publishes, splits, merges, make_vecs, transfers,
+    );
+    pt_info.push_str("packages = [");
+    for (package, count) in packages {
+        pt_info.push_str(format!("{} = {}, ", package, count).as_str());
+    }
+    pt_info.push_str("], modules = [");
+    for (module, count) in modules {
+        pt_info.push_str(format!("{} = {}, ", module, count).as_str());
+    }
+    pt_info.push_str("], functions = [");
+    for (function, count) in functions {
+        pt_info.push_str(format!("{} = {}, ", function, count).as_str());
+    }
+    pt_info.push_str("]");
+    write_gas_stats(pt_info.as_str());
+}
+
+    fn mint_epoch_rewards_in_pt(
     builder: &mut ProgrammableTransactionBuilder,
     params: &AdvanceEpochParams,
 ) -> (Argument, Argument) {
