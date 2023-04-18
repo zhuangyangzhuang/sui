@@ -7,9 +7,9 @@ import {
     getObjectDisplay,
 } from '@mysten/sui.js';
 
-import useMedia from '~/hooks/useMedia';
 import { ObjectDetails } from '~/ui/ObjectDetails';
 import { extractName, parseObjectType } from '~/utils/objectUtils';
+import { trimStdLibPrefix } from '~/utils/stringUtils';
 
 type OwnedObjectTypes = {
     obj: SuiObjectResponse;
@@ -17,14 +17,14 @@ type OwnedObjectTypes = {
 
 function OwnedObject({ obj }: OwnedObjectTypes): JSX.Element {
     const displayMeta = getObjectDisplay(obj).data;
-    const { url } = useMedia(displayMeta?.image_url ?? '');
+
     return (
         <ObjectDetails
             id={getObjectId(obj)}
             name={extractName(displayMeta) ?? ''}
             variant="small"
-            type={parseObjectType(obj)}
-            image={url}
+            type={trimStdLibPrefix(parseObjectType(obj))}
+            image={displayMeta?.image_url}
         />
     );
 }

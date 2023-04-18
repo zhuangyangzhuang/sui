@@ -33,11 +33,18 @@ function OwnedObjects({ id }: { id: string }) {
                         NFTs
                     </Heading>
 
-                    <div className="grid grid-cols-2 gap-6">
-                        {data?.pages[currentPage]?.data.map((obj) => (
-                            <OwnedObject obj={obj} key={obj?.data?.objectId} />
-                        ))}
-                    </div>
+                    {isLoading || isFetching ? (
+                        <LoadingSpinner />
+                    ) : (
+                        <div className="grid grid-cols-2 gap-6 overflow-auto">
+                            {data?.pages[currentPage]?.data.map((obj) => (
+                                <OwnedObject
+                                    obj={obj}
+                                    key={obj?.data?.objectId}
+                                />
+                            ))}
+                        </div>
+                    )}
 
                     {(hasNextPage || data?.pages.length > 1) && (
                         <Pagination

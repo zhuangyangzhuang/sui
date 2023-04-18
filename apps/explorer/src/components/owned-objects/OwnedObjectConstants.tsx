@@ -11,6 +11,7 @@ export type Data = {
     balance?: bigint;
     name?: string;
 };
+
 export type DataType = Data[];
 
 export const ITEMS_PER_PAGE: number = 8;
