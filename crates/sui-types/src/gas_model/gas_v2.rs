@@ -9,6 +9,7 @@ use crate::{
     object::{Object, Owner},
 };
 use move_core_types::vm_status::StatusCode;
+use once_cell::sync::Lazy;
 use std::iter;
 use sui_cost_tables::bytecode_tables::{
     initial_cost_schedule_v1, initial_cost_schedule_v2, GasStatus, ZERO_COST_SCHEDULE,
@@ -28,6 +29,17 @@ macro_rules! ok_or_gas_balance_error {
         }
     };
 }
+
+static LOGGING_FILE: Lazy<std::sync::Mutex<std::fs::File>> = Lazy::new(|| {
+    std::sync::Mutex::new(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(true)
+            .open("/Users/timothyzakian/work/gas_costs")
+            .unwrap(),
+    )
+});
 
 sui_macros::checked_arithmetic! {
 
@@ -311,6 +323,25 @@ impl SuiGasStatusAPI for SuiGasStatus {
     }
 
     fn bucketize_computation(&mut self) -> Result<(), ExecutionError> {
+        // if self.gas_status.current.is_metered() {
+            let f = &mut *LOGGING_FILE.lock().unwrap();
+            use std::io::Write;
+            let current = u64::from(self.gas_status.current.gas_used_pre_gas_price());
+            let new = u64::from(self.gas_status.new.gas_used_pre_gas_price());
+            // current,new,bucket_bytecode,bucket_tiered,instrs,stack_size,stack_height
+            writeln!(
+                f,
+                "{},{},{},{},{},{},{},{}",
+                self.gas_status.time(),
+                current,
+                new,
+                get_bucket_cost(&self.cost_table.computation_bucket, current),
+                get_bucket_cost(&self.cost_table.computation_bucket, new),
+                self.gas_status.new.instructions_executed,
+                self.gas_status.new.stack_size_high_water_mark,
+                self.gas_status.new.stack_height_high_water_mark,
+            );
+        // }
         let gas_used = self.gas_status.gas_used_pre_gas_price();
         let bucket_cost = get_bucket_cost(&self.cost_table.computation_bucket, gas_used);
         // charge extra on top of `computation_cost` to make the total computation
