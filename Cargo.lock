@@ -9127,6 +9127,7 @@ dependencies = [
  "strum_macros",
  "sui-config",
  "sui-core",
+ "sui-move-build",
  "sui-types",
  "test-utils",
  "tokio",

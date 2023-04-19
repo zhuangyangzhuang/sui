@@ -7,6 +7,7 @@ use insta::assert_snapshot;
 use move_cli::base::reroot_path;
 use move_disassembler::disassembler::Disassembler;
 use move_package::BuildConfig;
+use sui_move_build::SuiPackageHooks;
 
 const TEST_MODULE_DATA_DIR: &str = "../sui-framework/packages/sui-framework/tests";
 
@@ -35,6 +36,7 @@ async fn test_bytecode_disassemble_snapshot() -> Result<(), anyhow::Error> {
 }
 
 fn disassemble_test_module(name: String) -> anyhow::Result<String> {
+    move_package::package_hooks::register_package_hooks(Box::new(SuiPackageHooks));
     let path = PathBuf::from(TEST_MODULE_DATA_DIR);
     let config = BuildConfig {
         test_mode: true,
