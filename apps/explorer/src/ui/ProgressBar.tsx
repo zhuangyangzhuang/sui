@@ -11,14 +11,29 @@ export function ProgressBar({ progress }: ProgressBarProps) {
     return (
         <div className="w-full rounded-full bg-gray-45">
             <motion.div
-                className="rounded-full bg-gradient-to-r from-success via-success/50 to-success py-1"
+                className="relative rounded-full bg-gradient-to-r from-success via-success/50 to-success py-1"
                 initial={{ width: 0 }}
                 animate={{
                     width: `${progress}%`,
                     type: 'spring',
                     transition: { delay: 0.25, duration: 0.5 },
                 }}
-            />
+            >
+                <motion.div
+                    className="absolute left-1/2 top-1/2 h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white opacity-80 shadow-glow"
+                    animate={{
+                        left: '100%',
+                        opacity: 0.1,
+                        transition: {
+                            delay: 0.25,
+                            repeatDelay: 0.1,
+                            duration: 3,
+                            repeat: Infinity,
+                            ease: [0.65, 0, 0.35, 1]
+                        },
+                    }}
+                />
+            </motion.div>
         </div>
     );
 }

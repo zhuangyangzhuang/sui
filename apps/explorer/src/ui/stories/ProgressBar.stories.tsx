@@ -11,7 +11,7 @@ export default {
 
 export const Default: StoryObj<ProgressBarProps> = {
     args: {
-        progress: 25,
+        progress: 75,
     },
     render: (args) => (
         <div className="flex w-1/5">
