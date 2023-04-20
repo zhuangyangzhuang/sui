@@ -2063,7 +2063,7 @@ impl AuthorityState {
         }
     }
 
-    pub async fn get_move_object<T>(&self, object_id: &ObjectID) -> SuiResult<T>
+    pub fn get_move_object<T>(&self, object_id: &ObjectID) -> SuiResult<T>
     where
         T: DeserializeOwned,
     {
@@ -2092,7 +2092,7 @@ impl AuthorityState {
             .get_dynamic_fields_iterator(table, None)
             .ok()?
             .find(|df| key_bcs == df.bcs_name)?;
-        let field: Field<K, V> = self.get_move_object(&df.object_id).await.ok()?;
+        let field: Field<K, V> = self.get_move_object(&df.object_id).ok()?;
         Some(field.value)
     }
 
@@ -2245,7 +2245,7 @@ impl AuthorityState {
             .map(|info| info.object_id);
         let mut move_objects = vec![];
         for id in object_ids {
-            move_objects.push(self.get_move_object(&id).await?)
+            move_objects.push(self.get_move_object(&id)?)
         }
         Ok(move_objects)
     }
