@@ -697,6 +697,37 @@ impl<'a> MoveTestAdapter<'a> for SuiTestAdapter<'a> {
                 })?;
 
                 let state = self.compiled_state();
+                let original_named_address_mapping = state.named_address_mapping.clone();
+                if !dependencies.is_empty() {
+                    let named_address_mapping = &mut state.named_address_mapping;
+                    for maybe_upgraded_dep in dependencies.iter() {
+                        let Some((dep_name, version_number)) = maybe_upgraded_dep.rsplit_once('V') else {
+			    continue;
+			};
+                        if version_number == "1" {
+                            continue;
+                        }
+
+                        let mut original_dep = String::from(dep_name);
+                        original_dep.push_str("V1"); // Use the _original_ version of the dependency.
+                        let Some(original_dep_address) = named_address_mapping.get(&original_dep) else { continue };
+
+                        // Use the _original_ published address for the upgraded version of this dependency (> V1).
+                        named_address_mapping
+                            .insert(maybe_upgraded_dep.to_string(), *original_dep_address);
+                        // Temporarily clear the _original_ address for compilation (we'll restore it later). Otherwise,
+                        // we'll get a "Duplicate definition of module" when we try to compile both the original and
+                        // subsequent upgraded versions that define the same module.
+                        named_address_mapping.insert(
+                            original_dep,
+                            NumericalAddress::new(
+                                AccountAddress::ZERO.into_bytes(),
+                                NumberFormat::Hex,
+                            ),
+                        );
+                    }
+                }
+
                 let (mut modules, warnings_opt) = match syntax {
                     SyntaxChoice::Source => {
                         let (units, warnings_opt) =
@@ -724,6 +755,11 @@ impl<'a> MoveTestAdapter<'a> for SuiTestAdapter<'a> {
                         (vec![(None, module)], None)
                     }
                 };
+                {
+                    // Restore the original named address mapping that we modified for compilation above.
+                    let named_address_mapping = &mut state.named_address_mapping;
+                    *named_address_mapping = original_named_address_mapping;
+                }
                 let output = self.upgrade_package(
                     package,
                     &modules,
