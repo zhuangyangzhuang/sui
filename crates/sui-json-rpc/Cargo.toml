@@ -33,7 +33,6 @@ eyre = "0.6.8"
 
 tap = "1.0"
 
-sui-adapter = { path = "../sui-adapter" }
 sui-core = { path = "../sui-core" }
 sui-types = { path = "../sui-types" }
 sui-json = { path = "../sui-json" }
