@@ -14,7 +14,7 @@ tempfile = "3.3.0"
 
 serde-reflection = "0.3.6"
 sui-types = { path = "../sui-types" }
-sui-verifier = { path = "../sui-verifier" }
+sui-verifier = { path = "../../sui-execution/latest/sui-verifier", package = "sui-verifier-latest" }
 
 move-binary-format.workspace = true
 move-bytecode-utils.workspace = true
