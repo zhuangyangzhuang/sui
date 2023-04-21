@@ -3,12 +3,18 @@
 use anyhow::anyhow;
 use bip32::DerivationPath;
 use clap::*;
+use fastcrypto::ed25519::Ed25519KeyPair;
 use fastcrypto::encoding::{decode_bytes_hex, Base64, Encoding};
 use fastcrypto::hash::HashFunction;
 use fastcrypto::traits::KeyPair;
+use fastcrypto_zkp::bn254::api::Bn254Fr;
+use fastcrypto_zkp::bn254::poseidon::PoseidonWrapper;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use shared_crypto::intent::{Intent, IntentMessage};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use sui_keys::key_derive::generate_new_key;
 use sui_keys::keypair_file::{
     read_authority_keypair_from_file, read_keypair_from_file, write_authority_keypair_to_file,
@@ -16,12 +22,19 @@ use sui_keys::keypair_file::{
 };
 use sui_keys::keystore::{AccountKeystore, Keystore};
 use sui_types::base_types::SuiAddress;
-use sui_types::crypto::{get_authority_key_pair, EncodeDecodeBase64, SignatureScheme, SuiKeyPair};
+use sui_types::crypto::{
+    get_authority_key_pair, get_key_pair_from_rng, EncodeDecodeBase64, SignatureScheme, SuiKeyPair,
+};
 use sui_types::crypto::{DefaultHash, PublicKey, Signature};
 use sui_types::messages::TransactionData;
 use sui_types::multisig::{MultiSig, MultiSigPublicKey, ThresholdUnit, WeightUnit};
+use sui_types::openid_authenticator::{AuxInputs, ProofPoints, PublicInputs};
+use sui_types::openid_authenticator::{
+    OAuthProviderContent, OpenIdAuthenticator, SerializedVerifyingKey,
+};
 use sui_types::signature::GenericSignature;
 use tracing::info;
+use num_bigint::{BigInt, Sign};
 #[cfg(test)]
 #[path = "unit_tests/keytool_tests.rs"]
 mod keytool_tests;
@@ -116,6 +129,29 @@ pub enum KeyToolCommand {
         weights: Vec<WeightUnit>,
         #[clap(long)]
         threshold: ThresholdUnit,
+    },
+
+    ZkCookieLogIn {
+        #[clap(long)]
+        max_epoch: String,
+    },
+
+    GenerateOpenIdAuthenticatorAddress {
+        #[clap(long)]
+        verifying_key_path: PathBuf,
+    },
+
+    SerializeOpenIdAuthenticator {
+        #[clap(long)]
+        verifying_key_path: PathBuf,
+        #[clap(long)]
+        proof_points_path: PathBuf,
+        #[clap(long)]
+        public_inputs_path: PathBuf,
+        #[clap(long)]
+        aux_inputs_path: PathBuf,
+        #[clap(long)]
+        user_signature: String,
     },
 }
 
@@ -294,6 +330,78 @@ impl KeyToolCommand {
                 println!("MultiSig address: {address}");
                 println!("MultiSig parsed: {:?}", generic_sig);
                 println!("MultiSig serialized: {:?}", generic_sig.encode_base64());
+            }
+
+            KeyToolCommand::ZkCookieLogIn { max_epoch } => {
+                // todo: use a real rng here
+                // todo: unhardcode max epoch 10000
+                let kp: Ed25519KeyPair = get_key_pair_from_rng(&mut StdRng::from_seed([0; 32])).1;
+                
+                let skp = SuiKeyPair::Ed25519(kp.copy());
+                println!("Ephemeral pubkey: {:?}", skp.public().encode_base64());
+                println!("Ephemeral keypair: {:?}", skp.encode_base64());
+                
+                let bytes = kp.public().as_ref();
+                let (first_half, second_half) = bytes.split_at(bytes.len() / 2);
+                let first_bigint = BigInt::from_bytes_be(Sign::Plus, &first_half);
+                let second_bigint = BigInt::from_bytes_be(Sign::Plus, &second_half);
+
+                // Calculate the poseidon hash of 4 fields: eph_pub_key[0], eph_pub_key[1], max_epoch, randomness. 
+                let mut poseidon = PoseidonWrapper::new(4);
+                let first = Bn254Fr::from_str(&first_bigint.to_string()).unwrap();
+                let second = Bn254Fr::from_str(&second_bigint.to_string()).unwrap();
+                println!("first: {:?}", first.to_string());
+                println!("second: {:?}", second.to_string());
+                let max_epoch = Bn254Fr::from_str(max_epoch.as_str()).unwrap();
+                // todo: generate true randomness here
+                let randomness = Bn254Fr::from_str(
+                    "50683480294434968413708503290439057629605340925620961559740848568164438166",
+                )
+                .unwrap();
+                let hash = poseidon.hash(&[first, second, max_epoch, randomness]);
+                println!("Nonce: {:?}", hash.to_string());
+            }
+
+            KeyToolCommand::GenerateOpenIdAuthenticatorAddress { verifying_key_path } => {
+                let vk = SerializedVerifyingKey::from_fp(verifying_key_path.to_str().unwrap());
+                println!("Sui Address: {:?}", SuiAddress::from(&vk));
+            }
+
+            KeyToolCommand::SerializeOpenIdAuthenticator {
+                verifying_key_path,
+                proof_points_path,
+                public_inputs_path,
+                aux_inputs_path,
+                user_signature,
+            } => {
+                // User retrieves from bulletin content and signature from smart contract. Here we hardcode for now.
+                let bulletin = vec![
+                    OAuthProviderContent::new(
+                        "https://accounts.google.com".to_string(),
+                        "RSA".to_string(),
+                        "86969aec37a7780f18807877593bbbf8cf5de5ce".to_string(),
+                        "AQAB".to_string(),
+                        "zHv3roUMqfv4UbexMfPOA1hmPwAzfXr7Q7jz5hwgamvf8lD0zguxQZ80yCq9rwzIB8oP9w6AHPLbeexm0qhnXDHlO3Xnwt8T8URdrwSoLO9dKBwnXQiv1U6KPKXJUIfwZ0Vt3BPyhSMAZSUqqCA8OMVgxo0O4cgmmA5wAF57EqEOpUo73yEkmUMAUm-pSYoMfv_EfbMRC-sA2dpji6hCEouay45RK2EAXfyCTltVt2WFzZvKvtHaFVaorA3vQTqKBTHQ4-_qXAdiX0Oew3aLWv_Mlk0PCkfZKrGOIaPwyzWPizM52Lw5x_b-oCjJGrSMikD2-x4sHhXBHHIRlTP4JQ".to_string(),
+                        "RS256".to_string(),
+                        "575519204237-msop9ep45u2uo98hapqmngv8d84qdc8k.apps.googleusercontent.com".to_string()
+                    )
+                ];
+                let bulletin_signature = Signature::from_str("APtt+wjh6PrzMJuMvRzTW1C19G/hVLJIX/0A/q5yOfoTU26C+vFJIsJ1xu06GdSDbBQKb3tEyoF6/nUEZdtu+gENfas1jI2tqk76AEmnWwdDZVWxCjaCGbtoD3BXE0nXdQ==").map_err(|e| anyhow!(e))?;
+                let public_inputs = PublicInputs::from_fp(public_inputs_path.to_str().unwrap());
+                let authenticator = OpenIdAuthenticator::new(
+                    SerializedVerifyingKey::from_fp(verifying_key_path.to_str().unwrap()),
+                    ProofPoints::from_fp(proof_points_path.to_str().unwrap()),
+                    public_inputs,
+                    AuxInputs::from_fp(aux_inputs_path.to_str().unwrap()).unwrap(),
+                    Signature::from_str(&user_signature).map_err(|e| anyhow!(e))?,
+                    bulletin_signature,
+                    bulletin,
+                );
+                let sig = GenericSignature::from(authenticator);
+                println!(
+                    "OpenId Authenticator Signature Serialized: {:?}",
+                    sig.encode_base64()
+                );
             }
         }
 

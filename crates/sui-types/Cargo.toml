@@ -33,6 +33,9 @@ enum_dispatch = "^0.3"
 eyre = "0.6.8"
 indexmap = "1.9.2"
 derivative = "2.2.0"
+num-bigint = "0.4.3"
+num-traits = "0.2.15"
+regex = "1.7.3"
 
 move-binary-format.workspace = true
 move-bytecode-utils.workspace = true
@@ -51,6 +54,7 @@ mysten-network = { path = "../mysten-network" }
 sui-macros = { path = "../sui-macros" }
 
 fastcrypto = { workspace = true, features = ["copy_key"] }
+fastcrypto-zkp.workspace = true
 
 typed-store.workspace = true
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
