@@ -210,7 +210,7 @@ export function validatorsTableData(
     };
 }
 
-function ValidatorPageResult() {
+export default function ValidatorPage() {
     const { data, isLoading, isSuccess, isError } = useGetSystemState();
 
     const numberOfValidators = data?.activeValidators.length || 0;
@@ -369,5 +369,3 @@ function ValidatorPageResult() {
         </div>
     );
 }
-
-export { ValidatorPageResult };
