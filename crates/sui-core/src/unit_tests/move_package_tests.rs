@@ -431,7 +431,6 @@ fn test_fail_on_upgrade_missing_type() {
 }
 
 pub fn build_test_package(test_dir: &str) -> CompiledPackage {
-    move_package::package_hooks::register_package_hooks(Box::new(SuiPackageHooks));
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.extend(["src", "unit_tests", "data", "move_package", test_dir]);
     BuildConfig::new_for_testing().build(path).unwrap()
