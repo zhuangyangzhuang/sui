@@ -1,10 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::Result;
 use move_binary_format::{access::ModuleAccess, file_format::CompiledModule};
