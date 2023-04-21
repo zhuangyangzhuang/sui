@@ -24,4 +24,3 @@ sui-config = {path = "../sui-config"}
 sui-move-build = { path = "../sui-move-build" }
 move-cli.workspace = true
 move-disassembler.workspace = true
-move-package.workspace = true

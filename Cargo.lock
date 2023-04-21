@@ -9121,7 +9121,6 @@ dependencies = [
  "insta",
  "move-cli",
  "move-disassembler",
- "move-package",
  "serde 1.0.152",
  "strum",
  "strum_macros",
