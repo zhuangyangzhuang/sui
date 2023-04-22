@@ -13,7 +13,11 @@ import {
     updatePendingRequest,
 } from './storage';
 import { type QredoConnectPendingRequest } from './types';
-import { qredoConnectPageUrl, validateInputOrThrow } from './utils';
+import {
+    qredoConnectPageUrl,
+    toUIQredoPendingRequest,
+    validateInputOrThrow,
+} from './utils';
 import { type QredoConnectInput } from '_src/dapp-interface/WalletStandardInterface';
 import { type Message } from '_src/shared/messaging/messages';
 
@@ -91,3 +95,9 @@ export async function handleOnWindowClosed(
     });
     await storePendingRequests(remainingRequests);
 }
+
+export async function getAllUIQredoPendingRequests() {
+    return (await getAllPendingRequests()).map(toUIQredoPendingRequest);
+}
+
+export { registerForPendingRequestsChanges } from './storage';

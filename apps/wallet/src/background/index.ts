@@ -129,3 +129,5 @@ NetworkEnv.on('changed', async (network) => {
 Browser.windows.onRemoved.addListener(async (id) => {
     await Qredo.handleOnWindowClosed(id, connections);
 });
+
+Qredo.registerForPendingRequestsChanges(connections);
