@@ -13,6 +13,7 @@ export type SummaryCardProps = {
     footer?: ReactNode;
     minimalPadding?: boolean;
     showDivider?: boolean;
+    fullHeight?: boolean;
 };
 
 export function SummaryCard({
@@ -21,9 +22,15 @@ export function SummaryCard({
     footer,
     minimalPadding,
     showDivider = false,
+    fullHeight = false,
 }: SummaryCardProps) {
     return (
-        <div className="bg-white flex flex-col flex-nowrap border border-solid border-gray-45 rounded-2xl">
+        <div
+            className={cx(
+                'bg-white flex flex-col flex-nowrap border border-solid border-gray-45 rounded-2xl',
+                fullHeight ? 'min-h-full' : ''
+            )}
+        >
             {header ? (
                 <div className="flex flex-row flex-nowrap items-center justify-center uppercase bg-gray-40 px-3.75 py-2.5 rounded-t-2xl">
                     <Text
