@@ -33,7 +33,10 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use std::{collections::HashSet, ffi::CStr};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::CStr,
+};
 use tap::TapFallible;
 use tokio::sync::oneshot;
 use tracing::{error, info, instrument, warn};
@@ -611,6 +614,76 @@ impl RocksDBBatch {
     }
 }
 
+enum DeferredBatchOperation {
+    Delete { key: Vec<u8> },
+    Put { key: Vec<u8>, value: Vec<u8> },
+}
+
+pub struct DeferredBatch {
+    rocksdb: Arc<RocksDB>,
+    // batch operations by CF, in the order they were added
+    operations: HashMap<String, Vec<DeferredBatchOperation>>,
+}
+
+impl DeferredBatch {
+    fn new(rocksdb: &Arc<RocksDB>) -> Self {
+        Self {
+            rocksdb: rocksdb.clone(),
+            operations: HashMap::new(),
+        }
+    }
+
+    /// inserts a range of (key, value) pairs given as an iterator
+    pub fn insert_batch<J: Borrow<K>, K: Serialize, U: Borrow<V>, V: Serialize>(
+        &mut self,
+        db: &DBMap<K, V>,
+        new_vals: impl IntoIterator<Item = (J, U)>,
+    ) -> Result<&mut Self, TypedStoreError> {
+        if !Arc::ptr_eq(&db.rocksdb, &self.rocksdb) {
+            return Err(TypedStoreError::CrossDBBatch);
+        }
+
+        let entry = self
+            .operations
+            .entry(db.cf.clone())
+            .or_insert_with(Vec::new);
+
+        new_vals
+            .into_iter()
+            .try_for_each::<_, Result<_, TypedStoreError>>(|(k, v)| {
+                let key = be_fix_int_ser(k.borrow())?;
+                let value = bcs::to_bytes(v.borrow())?;
+                entry.push(DeferredBatchOperation::Put { key, value });
+                Ok(())
+            })?;
+        Ok(self)
+    }
+
+    pub fn delete_batch<J: Borrow<K>, K: Serialize, V>(
+        &mut self,
+        db: &DBMap<K, V>,
+        purged_vals: impl IntoIterator<Item = J>,
+    ) -> Result<(), TypedStoreError> {
+        if !Arc::ptr_eq(&db.rocksdb, &self.rocksdb) {
+            return Err(TypedStoreError::CrossDBBatch);
+        }
+
+        let entry = self
+            .operations
+            .entry(db.cf.clone())
+            .or_insert_with(Vec::new);
+
+        purged_vals
+            .into_iter()
+            .try_for_each::<_, Result<_, TypedStoreError>>(|k| {
+                let key = be_fix_int_ser(k.borrow())?;
+                entry.push(DeferredBatchOperation::Delete { key });
+                Ok(())
+            })?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct MetricConf {
     pub db_name_override: Option<String>,
@@ -769,6 +842,10 @@ impl<K, V> DBMap<K, V> {
             &self.db_metrics,
             &self.write_sample_interval,
         )
+    }
+
+    pub fn deferred_batch(&self) -> DeferredBatch {
+        DeferredBatch::new(&self.rocksdb)
     }
 
     pub fn compact_range<J: Serialize>(&self, start: &J, end: &J) -> Result<(), TypedStoreError> {
@@ -1218,6 +1295,25 @@ impl DBBatch {
                 Ok(())
             })?;
         Ok(self)
+    }
+
+    pub fn add_deferred_batch(&mut self, batch: DeferredBatch) -> &mut Self {
+        batch.operations.into_iter().for_each(|(cf, operations)| {
+            let cf_handle = self
+                .rocksdb
+                .cf_handle(&cf)
+                .expect("Map-keying column family should have been checked at DB creation");
+
+            operations.into_iter().for_each(|op| match op {
+                DeferredBatchOperation::Put { key, value } => {
+                    self.batch.put_cf(&cf_handle, key, value);
+                }
+                DeferredBatchOperation::Delete { key } => {
+                    self.batch.delete_cf(&cf_handle, key);
+                }
+            });
+        });
+        self
     }
 }
 

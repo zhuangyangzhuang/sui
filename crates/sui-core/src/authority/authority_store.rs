@@ -810,7 +810,7 @@ impl AuthorityStore {
             .acquire_read_locks_for_indirect_objects(&inner_temporary_store)
             .await;
         // Extract the new state from the execution
-        let mut write_batch = self.perpetual_tables.transactions.batch();
+        let mut write_batch = self.perpetual_tables.transactions.deferred_batch();
 
         // Store the certificate indexed by transaction digest
         let transaction_digest = transaction.digest();
